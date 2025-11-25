@@ -951,11 +951,11 @@ process.on('SIGTERM', () => {
   });
 });
 
-const server = app.listen(PORT, () => {
+const server = app.listen(PORT, '0.0.0.0', () => {
   console.log('='.repeat(50));
   console.log(`🚀 ValEval Server Started`);
   console.log(`📍 Environment: ${NODE_ENV}`);
-  console.log(`🌐 Server running on http://localhost:${PORT}`);
+  console.log(`🌐 Server running on http://0.0.0.0:${PORT}`);
   console.log(`👤 Admin username: ${ADMIN_USERNAME}`);
   if (NODE_ENV === 'development') {
     console.log(`📂 Share folders via: http://localhost:${PORT}/folder/[folder-id]`);
