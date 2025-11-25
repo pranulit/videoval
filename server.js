@@ -924,6 +924,11 @@ app.delete('/api/files/:id', requireAdmin, (req, res) => {
   }
 });
 
+// Serve main app (SPA - all routes serve index.html)
+app.get('/', (req, res) => {
+  res.sendFile(path.join(__dirname, 'public', 'index.html'));
+});
+
 // Public folder view (no auth required)
 app.get('/folder/:id', (req, res) => {
   res.sendFile(path.join(__dirname, 'public', 'index.html'));
