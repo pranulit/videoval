@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Video Reviews</title>
+    <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Video Reviews</h1>
+            <div class="header-actions">
+                <div id="adminPanel" style="display: none;">
+                    <button id="uploadBtn" class="btn btn-primary">Upload New File</button>
+                    <button id="logoutBtn" class="btn btn-secondary">Logout</button>
+                </div>
+                <button id="loginBtn" class="btn btn-primary">Admin Login</button>
+            </div>
+        </header>
+
+        <!-- Generate Thumbnails Button (Admin Only) -->
+        <div id="thumbnailGenSection" style="display: none; padding: 20px; background: #fef3c7; border-left: 4px solid #f59e0b; margin: 20px;">
+            <h3 style="margin-bottom: 10px;">🎬 Generate Thumbnails</h3>
+            <p style="margin-bottom: 10px; font-size: 14px;">Generate video thumbnails for all files that have videos but no thumbnails.</p>
+            <button id="generateThumbnailsBtn" class="btn btn-primary">Generate All Thumbnails</button>
+        </div>
+
+        <!-- Login Modal -->
+        <div id="loginModal" class="modal">
+            <div class="modal-content">
+                <h2>Admin Login</h2>
+                <form id="loginForm">
+                    <div class="form-group">
+                        <label for="username">Username:</label>
+                        <input type="text" id="username" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="password">Password:</label>
+                        <input type="password" id="password" required>
+                    </div>
+                    <div class="form-actions">
+                        <button type="submit" class="btn btn-primary">Login</button>
+                        <button type="button" class="btn btn-secondary" onclick="closeLoginModal()">Cancel</button>
+                    </div>
+                    <div id="loginError" class="error-message"></div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Upload Modal -->
+        <div id="uploadModal" class="modal" onclick="if(event.target === this) closeUploadModal()">
+            <div class="modal-content modal-large" onclick="event.stopPropagation()">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                    <h2 style="margin: 0;">Upload Video Files</h2>
+                    <button type="button" class="btn btn-danger" onclick="closeUploadModal()" style="padding: 10px 20px; font-size: 16px;">✕ Close</button>
+                </div>
+                
+                <!-- Upload Mode Toggle -->
+                <div class="upload-mode-toggle">
+                    <label class="mode-switch">
+                        <input type="checkbox" id="uploadModeToggle" checked>
+                        <span class="mode-label">
+                            <strong>Bulk Upload Mode</strong> (Multiple videos + CSVs with auto-pairing)
+                        </span>
+                    </label>
+                </div>
+                
+                <!-- Mode Info -->
+                <div id="bulkUploadInfo" class="upload-info" style="display: block;">
+                    <p><strong>📦 Bulk Mode:</strong> Select 2 folders (videos + CSVs) then click "Upload Files"</p>
+                    <p><strong>Steps:</strong></p>
+                    <ol style="margin: 5px 0 5px 20px; font-size: 12px;">
+                        <li>Click "Browse Folders" and select your <strong>videos folder</strong></li>
+                        <li>Click "Browse Folders" again and select your <strong>CSVs folder</strong></li>
+                        <li>Review the files listed below</li>
+                        <li>Click "Upload Files" to start the upload</li>
+                    </ol>
+                    <p><strong>Matching examples:</strong></p>
+                    <ul style="margin: 5px 0 5px 20px; font-size: 12px;">
+                        <li><code>LT0023_B251103_Person1+NL_677.mp4</code> ↔ <code>LT0023_B251103_Person1+NL_677.csv</code></li>
+                        <li><code>LT0023_B251103_Person1+NL_677_v001.mp4</code> ↔ <code>LT0023_B251103_Person1+NL_677.csv</code></li>
+                        <li><code>LT0023_B251103_Person1+NL_677.mp4</code> ↔ <code>LT0023_B251103_Person1+NL_677_split.csv</code></li>
+                    </ul>
+                    <p><strong>Grouping:</strong> First 4 tokens = <code>LT0023_B251103_Person1+NL_677</code></p>
+                </div>
+                
+                <div id="singleUploadInfo" class="upload-info" style="display: none;">
+                    <p><strong>📄 Single Mode:</strong> Upload exactly 1 video + 1 CSV file. Names will be validated.</p>
+                    <p><strong>Step 1:</strong> Drag & drop your <strong style="color: #dc2626;">VIDEO file</strong> (.mp4, .mov, .webm, .avi)</p>
+                    <p><strong>Step 2:</strong> Drag & drop your <strong style="color: #2563eb;">CSV file</strong> (.csv)</p>
+                    <p><em>Files will accumulate. If you drop another file of the same type, it replaces the previous one.</em></p>
+                    <p>⚠️ You'll be alerted if the file names don't match.</p>
+                </div>
+                
+                <!-- Drag and Drop Zone -->
+                <div id="dropZone" class="drop-zone">
+                    <div class="drop-zone-content">
+                        <p class="drop-icon">📁</p>
+                        <p class="drop-text" id="dropZoneText">Select folders with videos and CSVs</p>
+                        <p class="drop-subtext" style="font-size: 12px; color: #6b7280;">Click button multiple times to select multiple folders</p>
+                        <button type="button" id="browseBtn" class="btn btn-primary" onclick="document.getElementById('fileInput').click()">Browse Folders</button>
+                        <button type="button" id="clearFilesBtn" class="btn btn-secondary" onclick="clearSelectedFiles()" style="display: none; margin-top: 10px;">Clear Selection</button>
+                    </div>
+                </div>
+                
+                <form id="uploadForm">
+                    <div class="form-group" style="display: none;">
+                        <input type="file" id="fileInput" accept=".csv,.mp4,.webm,.mov,.avi" multiple webkitdirectory directory>
+                    </div>
+                    <div class="form-group">
+                        <label for="uploadToFolder">📁 Upload to folder:</label>
+                        <select id="uploadToFolder" class="folder-select">
+                            <option value="">All Files (No Folder)</option>
+                        </select>
+                    </div>
+                    
+                    <!-- Selected Files List -->
+                    <div id="selectedFilesList" class="selected-files-list" style="display: none;">
+                        <h4>Selected Files (<span id="fileCount">0</span>):</h4>
+                        <div id="filesList" class="files-list"></div>
+                    </div>
+                    
+                    <!-- Upload Progress -->
+                    <div id="uploadProgress" class="upload-progress" style="display: none;">
+                        <div class="progress-bar-container">
+                            <div id="progressBar" class="progress-bar"></div>
+                        </div>
+                        <p id="progressText">Uploading 0 of 0 files...</p>
+                    </div>
+                    
+                    <div class="form-actions">
+                        <button type="submit" class="btn btn-primary" id="uploadSubmitBtn" disabled onclick="console.log('Upload button clicked!')">Upload Files</button>
+                        <button type="button" class="btn btn-secondary" onclick="closeUploadModal()">Cancel</button>
+                    </div>
+                    <div id="uploadError" class="error-message"></div>
+                </form>
+            </div>
+        </div>
+
+        <!-- Bulk Actions Bar (Admin Only) -->
+        <div id="bulkActionsBar" class="bulk-actions-bar" style="display: none;">
+            <label class="select-all-label">
+                <input type="checkbox" id="selectAllFiles">
+                <strong>Select All</strong>
+            </label>
+            <span id="selectedCountDisplay" style="display: none;">
+                <strong><span id="selectedCount">0</span> selected</strong>
+            </span>
+            <button id="deleteSelectedBtn" class="btn btn-danger" style="display: none;">🗑️ Delete Selected</button>
+            <button id="cancelSelectionBtn" class="btn btn-secondary" style="display: none;">Cancel</button>
+        </div>
+
+        <!-- Folder & File Selection -->
+        <div class="file-section">
+            <div class="section-header">
+                <h2>Files & Folders</h2>
+                <div class="folder-controls" id="folderControls" style="display: none;">
+                    <button id="newFolderBtn" class="btn btn-primary">📁 New Folder</button>
+                </div>
+            </div>
+            
+            <!-- Folder Explorer View -->
+            <div id="folderExplorer" class="folder-explorer">
+                <!-- All Files Section -->
+                <div class="explorer-section">
+                    <div class="explorer-header" onclick="toggleSection('allFiles')">
+                        <span class="toggle-icon">▼</span>
+                        <strong>📂 All Files</strong>
+                        <span class="file-count-badge" id="allFilesCount">0</span>
+                    </div>
+                    <div id="allFilesContent" class="explorer-content">
+                        <div id="allFilesList" class="file-grid"></div>
+                    </div>
+                </div>
+                
+                <!-- Folders Section -->
+                <div id="foldersContainer"></div>
+            </div>
+        </div>
+        
+        <!-- Create Folder Modal -->
+        <div id="createFolderModal" class="modal">
+            <div class="modal-content">
+                <h2>Create New Folder</h2>
+                <form id="createFolderForm">
+                    <div class="form-group">
+                        <label for="folderName">Folder Name:</label>
+                        <input type="text" id="folderName" required placeholder="e.g., Batch 2024-11">
+                    </div>
+                    <div class="form-actions">
+                        <button type="submit" class="btn btn-primary">Create</button>
+                        <button type="button" class="btn btn-secondary" onclick="closeCreateFolderModal()">Cancel</button>
+                    </div>
+                    <div id="folderError" class="error-message"></div>
+                </form>
+            </div>
+        </div>
+        
+        <!-- Assign Folder Modal -->
+        <div id="assignFolderModal" class="modal" onclick="closeAssignFolderModal()">
+            <div class="modal-content" onclick="event.stopPropagation()">
+                <h2>Move to Folder</h2>
+                <div class="form-group">
+                    <label for="targetFolder">Select Folder:</label>
+                    <select id="targetFolder" class="folder-select">
+                        <option value="">All Files (No Folder)</option>
+                    </select>
+                </div>
+                <div class="form-actions">
+                    <button type="button" class="btn btn-primary" onclick="assignToFolder()">Move</button>
+                    <button type="button" class="btn btn-secondary" onclick="closeAssignFolderModal()">Cancel</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- CSV Editor -->
+        <div id="editorSection" class="editor-section" style="display: none;">
+            <div class="editor-header">
+                <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+                    <h2 id="currentFileName">File Name</h2>
+                </div>
+                <div class="editor-actions">
+                    <div class="filter-controls">
+                        <label>
+                            <input type="checkbox" id="filterKeep" checked> Show Keep
+                        </label>
+                        <label>
+                            <input type="checkbox" id="filterCut" checked> Show Cut
+                        </label>
+                    </div>
+                    <button id="columnToggleBtn" class="btn btn-secondary btn-sm">Toggle Columns</button>
+                    <button id="videoModeBtn" class="btn btn-secondary btn-sm">Full Video Mode</button>
+                    <div class="stats">
+                        <span id="statsKeep" class="stat-badge stat-keep">Keep: 0</span>
+                        <span id="statsCut" class="stat-badge stat-cut">Cut: 0</span>
+                        <span id="statsKeepDuration" class="stat-badge stat-duration-keep">Keep Duration: 0s</span>
+                        <span id="statsTotalDuration" class="stat-badge stat-duration-total">Total Duration: 0s</span>
+                    </div>
+                    <div class="completion-toggle">
+                        <label>
+                            <input type="checkbox" id="completionCheckbox">
+                            Mark as Completed
+                        </label>
+                    </div>
+                    <button id="saveBtn" class="btn btn-success">Save Changes</button>
+                    <button id="downloadBtn" class="btn btn-primary" style="display: none;">Download CSV</button>
+                    <button id="exportSrtBtn" class="btn btn-primary" style="display: none;">Export SRT</button>
+                    <button type="button" id="closeEditorBtn" class="btn btn-danger">Close</button>
+                </div>
+            </div>
+            
+            <!-- Column Visibility Panel -->
+            <div id="columnPanel" class="column-panel" style="display: none;">
+                <h3>Toggle Column Visibility</h3>
+                <div id="columnToggles" class="column-toggles"></div>
+            </div>
+            
+            <!-- Full Video Player Section -->
+            <div id="fullVideoSection" class="full-video-section" style="display: none;">
+                <div class="video-controls-header">
+                    <div class="video-mode-controls">
+                        <div class="mode-toggle-container">
+                            <span class="mode-label" id="modeLabelLeft">Caption Checking Mode</span>
+                            <label class="toggle-switch">
+                                <input type="checkbox" id="videoCommentsMode">
+                                <span class="toggle-slider"></span>
+                            </label>
+                            <span class="mode-label" id="modeLabelRight">Video Comments Mode</span>
+                        </div>
+                        <button id="exportCommentsBtn" class="btn btn-secondary btn-sm" style="display: none;">💬 Export Comments</button>
+                    </div>
+                </div>
+                
+                <div class="video-editor-layout" id="videoEditorLayout">
+                    <!-- Left: Video Player -->
+                    <div class="video-column">
+                        <div class="full-video-container">
+                            <video id="fullVideoElement" controls preload="auto"></video>
+                            <div id="videoCaption" class="video-caption"></div>
+                        </div>
+                        <div class="video-info">
+                            <div class="current-timestamp">
+                                <strong>Current Time:</strong> <span id="currentTimestamp">00:00:00.000</span>
+                            </div>
+                            <div class="caption-toggle-control">
+                                <label>
+                                    <input type="checkbox" id="showCaptionsToggle" checked>
+                                    <strong>Show Captions on Video</strong>
+                                </label>
+                                <label>
+                                    <input type="checkbox" id="splitCaptionsToggle">
+                                    <strong>Split Captions (20 chars max)</strong>
+                                </label>
+                                <button id="downloadSplitCaptionsBtn" class="btn btn-sm btn-primary" style="display: none;">
+                                    Download Split Captions
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Right: Always visible panels (one at a time) -->
+                    <div class="right-panel-container">
+                        <!-- Default: Caption Check Table -->
+                        <div class="caption-check-column" id="captionCheckTable">
+                            <h4>Subtitles Timeline</h4>
+                            <div class="caption-table-container">
+                                <table class="caption-table">
+                                    <thead id="captionCheckHead"></thead>
+                                    <tbody id="captionCheckBody"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                        
+                        <!-- Video Comments Panel (toggle) -->
+                        <div class="caption-check-column" id="videoCommentsPanel" style="display: none;">
+                            <h4>Video Review Comments</h4>
+                            <div id="generalCommentsList" class="general-comments-list" style="max-height: 400px; overflow-y: auto; margin-bottom: 20px;">
+                                <p class="no-comments">No comments yet. Add one below!</p>
+                            </div>
+                            <div class="add-general-comment">
+                                <textarea id="generalCommentInput" class="comment-textarea" placeholder="Add a comment about this video..." rows="3"></textarea>
+                                <button id="addGeneralCommentBtn" class="btn btn-primary">Add Comment</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Hover Video Player -->
+            <div id="hoverVideoPlayer" class="video-player" style="display: none;">
+                <video id="hoverVideoElement" preload="auto"></video>
+            </div>
+            
+            <!-- Main Table (Always visible in hover mode) -->
+            <div class="table-container">
+                <table id="csvTable">
+                    <thead id="tableHead"></thead>
+                    <tbody id="tableBody"></tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <div id="notification" class="notification"></div>
+
+    <script src="/app.js"></script>
+</body>
+</html>
+

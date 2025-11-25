@@ -1,0 +1,2578 @@
+// Global state
+let currentFileId = null;
+let currentData = [];
+let splitCaptions = []; // Store split captions separately
+let isAdmin = false;
+let isCompleted = false;
+let columnVisibility = {};
+let currentVideoFile = null;
+let hoverVideoElement = null;
+let fullVideoElement = null;
+let videoPlayInterval = null;
+let videoMode = 'hover'; // 'hover' or 'full'
+let selectedRowIndex = null;
+let folders = [];
+let selectedFolder = null;
+let fileToMove = null;
+let videoComments = [];
+let uploadMode = 'bulk'; // 'bulk' or 'single'
+let selectedFiles = new Set(); // For bulk delete
+let saveTimeout = null; // For debouncing save function
+
+// Initialize
+document.addEventListener('DOMContentLoaded', () => {
+    // Check if viewing a specific folder from URL
+    const urlPath = window.location.pathname;
+    const folderMatch = urlPath.match(/\/folder\/(\d+)/);
+    if (folderMatch) {
+        selectedFolder = folderMatch[1];
+    }
+    
+    // Hide sections by default
+    const editorSection = document.getElementById('editorSection');
+    const fullVideoSection = document.getElementById('fullVideoSection');
+    
+    if (editorSection) editorSection.style.display = 'none';
+    if (fullVideoSection) fullVideoSection.style.display = 'none';
+    
+    checkAuthStatus();
+    loadFolders();
+    loadFiles();
+    setupEventListeners();
+});
+
+// Setup event listeners
+function setupEventListeners() {
+    document.getElementById('loginBtn').addEventListener('click', openLoginModal);
+    document.getElementById('loginForm').addEventListener('submit', handleLogin);
+    document.getElementById('logoutBtn').addEventListener('click', handleLogout);
+    document.getElementById('uploadBtn').addEventListener('click', openUploadModal);
+    
+    const uploadForm = document.getElementById('uploadForm');
+    if (uploadForm) {
+        console.log('Upload form found, attaching submit handler');
+        uploadForm.addEventListener('submit', handleUpload);
+    } else {
+        console.error('Upload form not found!');
+    }
+    document.getElementById('saveBtn').addEventListener('click', saveChanges);
+    document.getElementById('downloadBtn').addEventListener('click', downloadFile);
+    document.getElementById('closeEditorBtn').addEventListener('click', closeEditor);
+    document.getElementById('filterKeep').addEventListener('change', applyFilters);
+    document.getElementById('filterCut').addEventListener('change', applyFilters);
+    document.getElementById('completionCheckbox').addEventListener('change', toggleCompletion);
+    document.getElementById('columnToggleBtn').addEventListener('click', toggleColumnPanel);
+    document.getElementById('exportSrtBtn').addEventListener('click', exportSrt);
+    
+    const videoUploadForm = document.getElementById('videoUploadForm');
+    if (videoUploadForm) videoUploadForm.addEventListener('submit', handleVideoUpload);
+    
+    document.getElementById('videoModeBtn').addEventListener('click', toggleVideoMode);
+    document.getElementById('showCaptionsToggle').addEventListener('change', toggleCaptionDisplay);
+    document.getElementById('splitCaptionsToggle').addEventListener('change', toggleSplitCaptions);
+    document.getElementById('downloadSplitCaptionsBtn').addEventListener('click', downloadSplitCaptions);
+    document.getElementById('videoCommentsMode').addEventListener('change', toggleVideoCommentsMode);
+    
+    // These buttons don't exist in new layout - make optional
+    const addCommentBtn = document.getElementById('addCommentBtn');
+    if (addCommentBtn) addCommentBtn.addEventListener('click', addCommentAtTimestamp);
+    
+    const jumpToSegmentBtn = document.getElementById('jumpToSegmentBtn');
+    if (jumpToSegmentBtn) jumpToSegmentBtn.addEventListener('click', jumpToSelectedSegment);
+    
+    const scrollToCurrentBtn = document.getElementById('scrollToCurrentBtn');
+    if (scrollToCurrentBtn) scrollToCurrentBtn.addEventListener('click', scrollToCurrentSegment);
+    
+    const exportCommentsBtn = document.getElementById('exportCommentsBtn');
+    if (exportCommentsBtn) exportCommentsBtn.addEventListener('click', exportComments);
+    
+    document.getElementById('newFolderBtn').addEventListener('click', openCreateFolderModal);
+    document.getElementById('createFolderForm').addEventListener('submit', handleCreateFolder);
+    document.getElementById('addGeneralCommentBtn').addEventListener('click', addGeneralComment);
+    document.getElementById('uploadModeToggle').addEventListener('change', toggleUploadMode);
+    const generateBtn = document.getElementById('generateThumbnailsBtn');
+    if (generateBtn) generateBtn.addEventListener('click', generateAllThumbnails);
+    
+    const selectAllBtn = document.getElementById('selectAllFiles');
+    if (selectAllBtn) selectAllBtn.addEventListener('change', toggleSelectAll);
+    
+    const deleteSelectedBtn = document.getElementById('deleteSelectedBtn');
+    if (deleteSelectedBtn) deleteSelectedBtn.addEventListener('click', deleteSelectedFiles);
+    
+    const cancelSelectionBtn = document.getElementById('cancelSelectionBtn');
+    if (cancelSelectionBtn) cancelSelectionBtn.addEventListener('click', cancelSelection);
+    
+    hoverVideoElement = document.getElementById('hoverVideoElement');
+    fullVideoElement = document.getElementById('fullVideoElement');
+    
+    // Update timestamp display and captions
+    if (fullVideoElement) {
+        fullVideoElement.addEventListener('timeupdate', updateTimestampDisplay);
+    }
+    
+    // Update caption size on window resize
+    window.addEventListener('resize', () => {
+        if (fullVideoElement && fullVideoElement.videoWidth > 0) {
+            updateCaptionSize();
+        }
+    });
+}
+
+// Auth functions
+async function checkAuthStatus() {
+    try {
+        const response = await fetch('/api/auth-status');
+        const data = await response.json();
+        isAdmin = data.isAdmin;
+        updateUIForAuth();
+    } catch (error) {
+        console.error('Error checking auth:', error);
+    }
+}
+
+function updateUIForAuth() {
+    if (isAdmin) {
+        document.getElementById('adminPanel').style.display = 'flex';
+        document.getElementById('loginBtn').style.display = 'none';
+        document.getElementById('downloadBtn').style.display = 'inline-block';
+        document.getElementById('exportSrtBtn').style.display = 'inline-block';
+        document.getElementById('folderControls').style.display = 'block';
+        document.getElementById('thumbnailGenSection').style.display = 'block';
+        document.getElementById('bulkActionsBar').style.display = 'flex';
+    } else {
+        document.getElementById('adminPanel').style.display = 'none';
+        document.getElementById('loginBtn').style.display = 'inline-block';
+        document.getElementById('downloadBtn').style.display = 'none';
+        document.getElementById('exportSrtBtn').style.display = 'none';
+        document.getElementById('folderControls').style.display = 'none';
+        document.getElementById('thumbnailGenSection').style.display = 'none';
+        document.getElementById('bulkActionsBar').style.display = 'none';
+    }
+    updateBulkDeleteUI();
+    
+    // Update shared mode UI if editor is open
+    if (currentFileId) {
+        updateUIForSharedMode();
+    }
+}
+
+async function generateAllThumbnails() {
+    if (!confirm('Generate thumbnails for all videos? This may take a few minutes.')) return;
+    
+    const btn = document.getElementById('generateThumbnailsBtn');
+    const originalText = btn.textContent;
+    btn.textContent = 'Generating...';
+    btn.disabled = true;
+    
+    try {
+        const response = await fetch('/api/generate-thumbnails', {
+            method: 'POST'
+        });
+        
+        if (response.ok) {
+            const result = await response.json();
+            showNotification(result.message, 'success');
+            btn.textContent = originalText;
+            btn.disabled = false;
+            loadFiles(); // Reload to show thumbnails
+        } else {
+            const error = await response.json();
+            showNotification('Error: ' + (error.error || 'Failed'), 'error');
+            btn.textContent = originalText;
+            btn.disabled = false;
+        }
+    } catch (error) {
+        showNotification('Error: ' + error.message, 'error');
+        btn.textContent = originalText;
+        btn.disabled = false;
+    }
+}
+
+function openLoginModal() {
+    document.getElementById('loginModal').classList.add('active');
+    document.getElementById('loginError').textContent = '';
+}
+
+function closeLoginModal() {
+    document.getElementById('loginModal').classList.remove('active');
+    document.getElementById('loginForm').reset();
+}
+
+async function handleLogin(e) {
+    e.preventDefault();
+    const username = document.getElementById('username').value;
+    const password = document.getElementById('password').value;
+
+    try {
+        const response = await fetch('/api/login', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ username, password })
+        });
+
+        if (response.ok) {
+            isAdmin = true;
+            closeLoginModal();
+            updateUIForAuth();
+            showNotification('Logged in successfully', 'success');
+        } else {
+            document.getElementById('loginError').textContent = 'Invalid credentials';
+        }
+    } catch (error) {
+        document.getElementById('loginError').textContent = 'Login failed';
+    }
+}
+
+async function handleLogout() {
+    try {
+        await fetch('/api/logout', { method: 'POST' });
+        isAdmin = false;
+        updateUIForAuth();
+        closeEditor();
+        showNotification('Logged out successfully', 'success');
+    } catch (error) {
+        console.error('Logout error:', error);
+    }
+}
+
+// Upload functions
+function toggleUploadMode() {
+    const isBulk = document.getElementById('uploadModeToggle').checked;
+    uploadMode = isBulk ? 'bulk' : 'single';
+    
+    const bulkInfo = document.getElementById('bulkUploadInfo');
+    const singleInfo = document.getElementById('singleUploadInfo');
+    const dropZoneText = document.getElementById('dropZoneText');
+    const browseBtn = document.getElementById('browseBtn');
+    const fileInput = document.getElementById('fileInput');
+    
+    // Clear any selected files when switching modes
+    clearSelectedFiles();
+    
+    if (uploadMode === 'bulk') {
+        bulkInfo.style.display = 'block';
+        singleInfo.style.display = 'none';
+        dropZoneText.textContent = 'Select folders with videos and CSVs';
+        browseBtn.textContent = 'Browse Folders';
+        fileInput.setAttribute('webkitdirectory', '');
+        fileInput.setAttribute('directory', '');
+    } else {
+        bulkInfo.style.display = 'none';
+        singleInfo.style.display = 'block';
+        dropZoneText.textContent = 'Drag & drop 1 video + 1 CSV file here';
+        browseBtn.textContent = 'Browse Files';
+        fileInput.removeAttribute('webkitdirectory');
+        fileInput.removeAttribute('directory');
+    }
+}
+
+function openUploadModal() {
+    document.getElementById('uploadModal').classList.add('active');
+    document.getElementById('uploadError').textContent = '';
+    document.getElementById('selectedFilesList').style.display = 'none';
+    document.getElementById('uploadProgress').style.display = 'none';
+    document.getElementById('uploadSubmitBtn').disabled = true;
+    
+    // Reset upload mode
+    document.getElementById('uploadModeToggle').checked = true;
+    uploadMode = 'bulk';
+    toggleUploadMode();
+    
+    // Update folder dropdown in upload modal
+    const uploadToFolder = document.getElementById('uploadToFolder');
+    const folderOptions = folders.map(f => `<option value="${f.id}">${f.name}</option>`).join('');
+    uploadToFolder.innerHTML = '<option value="">All Files (No Folder)</option>' + folderOptions;
+    
+    // Setup drag and drop
+    setupUploadDropZone();
+    
+    // Setup file input change
+    const fileInput = document.getElementById('fileInput');
+    fileInput.addEventListener('change', handleFileSelection);
+}
+
+function closeUploadModal() {
+    document.getElementById('uploadModal').classList.remove('active');
+    document.getElementById('uploadForm').reset();
+    document.getElementById('selectedFilesList').style.display = 'none';
+    document.getElementById('uploadProgress').style.display = 'none';
+    document.getElementById('uploadSubmitBtn').disabled = true;
+    document.getElementById('uploadError').textContent = '';
+    document.getElementById('uploadError').style.color = '';
+    
+    const clearBtn = document.getElementById('clearFilesBtn');
+    if (clearBtn) clearBtn.style.display = 'none';
+    
+    const filesList = document.getElementById('filesList');
+    if (filesList) filesList.innerHTML = '';
+    
+    const fileCount = document.getElementById('fileCount');
+    if (fileCount) fileCount.textContent = '0';
+    
+    // Clear selected files
+    window.selectedFiles = null;
+}
+
+function setupUploadDropZone() {
+    const dropZone = document.getElementById('dropZone');
+    
+    ['dragenter', 'dragover', 'dragleave', 'drop'].forEach(eventName => {
+        dropZone.addEventListener(eventName, (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+        });
+    });
+    
+    ['dragenter', 'dragover'].forEach(eventName => {
+        dropZone.addEventListener(eventName, () => {
+            dropZone.classList.add('drag-over');
+        });
+    });
+    
+    ['dragleave', 'drop'].forEach(eventName => {
+        dropZone.addEventListener(eventName, () => {
+            dropZone.classList.remove('drag-over');
+        });
+    });
+    
+    dropZone.addEventListener('drop', (e) => {
+        let files = Array.from(e.dataTransfer.files);
+        
+        if (uploadMode === 'bulk') {
+            // Filter to only CSV and video files
+            files = files.filter(f => {
+                const name = f.name.toLowerCase();
+                return name.endsWith('.csv') || name.endsWith('.mp4') || 
+                       name.endsWith('.webm') || name.endsWith('.mov') || name.endsWith('.avi');
+            });
+            
+            if (files.length === 0) {
+                showNotification('No valid files found. Please drag folders with CSV and video files.', 'error');
+                return;
+            }
+            
+            // Accumulate in bulk mode too
+            if (window.selectedFiles && window.selectedFiles.length > 0) {
+                files = [...window.selectedFiles, ...files];
+            }
+            
+            displaySelectedFiles(files);
+        } else {
+            // Single mode: Accumulate files (keep 1 CSV and 1 video max)
+            const newCsvFiles = files.filter(f => f.name.toLowerCase().endsWith('.csv'));
+            const newVideoFiles = files.filter(f => {
+                const name = f.name.toLowerCase();
+                return name.endsWith('.mp4') || name.endsWith('.webm') || 
+                       name.endsWith('.mov') || name.endsWith('.avi');
+            });
+            
+            // Get existing files if any
+            const existingFiles = window.selectedFiles || [];
+            const existingCsvs = existingFiles.filter(f => f.name.toLowerCase().endsWith('.csv'));
+            const existingVideos = existingFiles.filter(f => {
+                const name = f.name.toLowerCase();
+                return name.endsWith('.mp4') || name.endsWith('.webm') || 
+                       name.endsWith('.mov') || name.endsWith('.avi');
+            });
+            
+            // Logic: Keep 1 CSV and 1 video. New files replace old ones of same type.
+            let finalCsv = null;
+            let finalVideo = null;
+            
+            // If new CSV dropped, use it (replaces old). Otherwise keep existing.
+            if (newCsvFiles.length > 0) {
+                finalCsv = newCsvFiles[0];
+            } else if (existingCsvs.length > 0) {
+                finalCsv = existingCsvs[0];
+            }
+            
+            // If new video dropped, use it (replaces old). Otherwise keep existing.
+            if (newVideoFiles.length > 0) {
+                finalVideo = newVideoFiles[0];
+            } else if (existingVideos.length > 0) {
+                finalVideo = existingVideos[0];
+            }
+            
+            files = [];
+            if (finalCsv) files.push(finalCsv);
+            if (finalVideo) files.push(finalVideo);
+            
+            console.log('Final files for single mode:', files.length, '- CSV:', !!finalCsv, 'Video:', !!finalVideo);
+            
+            if (files.length > 0) {
+                displaySelectedFiles(files);
+            } else {
+                showNotification('Please drop CSV and/or video files', 'error');
+            }
+        }
+    });
+}
+
+function handleFileSelection(e) {
+    let files = Array.from(e.target.files);
+    
+    if (uploadMode === 'bulk') {
+        // Bulk mode: Accumulate files from multiple folder selections
+        files = files.filter(f => {
+            const name = f.name.toLowerCase();
+            return name.endsWith('.csv') || name.endsWith('.mp4') || 
+                   name.endsWith('.webm') || name.endsWith('.mov') || name.endsWith('.avi');
+        });
+        
+        if (files.length === 0) {
+            showNotification('No valid files found in selected folder', 'error');
+            document.getElementById('uploadError').textContent = 'No CSV or video files found';
+            return;
+        }
+        
+        // Append to existing selected files
+        if (window.selectedFiles && window.selectedFiles.length > 0) {
+            const existingFiles = window.selectedFiles;
+            files = [...existingFiles, ...files];
+        }
+    } else {
+        // Single mode: Accumulate until we have 1 CSV and 1 video
+        const newCsvFiles = files.filter(f => f.name.toLowerCase().endsWith('.csv'));
+        const newVideoFiles = files.filter(f => {
+            const name = f.name.toLowerCase();
+            return name.endsWith('.mp4') || name.endsWith('.webm') || 
+                   name.endsWith('.mov') || name.endsWith('.avi');
+        });
+        
+        // Get existing files if any
+        const existingFiles = window.selectedFiles || [];
+        const existingCsvs = existingFiles.filter(f => f.name.toLowerCase().endsWith('.csv'));
+        const existingVideos = existingFiles.filter(f => {
+            const name = f.name.toLowerCase();
+            return name.endsWith('.mp4') || name.endsWith('.webm') || 
+                   name.endsWith('.mov') || name.endsWith('.avi');
+        });
+        
+        // Combine: take 1 CSV and 1 video
+        const allCsvs = [...existingCsvs, ...newCsvFiles];
+        const allVideos = [...existingVideos, ...newVideoFiles];
+        
+        files = [];
+        if (allCsvs.length > 0) files.push(allCsvs[0]); // Take first CSV
+        if (allVideos.length > 0) files.push(allVideos[0]); // Take first video
+        
+        if (files.length === 0) {
+            showNotification('Please select CSV and/or video files', 'error');
+            return;
+        }
+    }
+    
+    if (files.length > 0) {
+        displaySelectedFiles(files);
+    }
+    
+    // Reset the file input so files can be selected again
+    e.target.value = '';
+}
+
+function displaySelectedFiles(files) {
+    console.log('displaySelectedFiles called with:', files.length, 'files');
+    
+    const selectedFilesList = document.getElementById('selectedFilesList');
+    const filesList = document.getElementById('filesList');
+    const fileCount = document.getElementById('fileCount');
+    const submitBtn = document.getElementById('uploadSubmitBtn');
+    const uploadError = document.getElementById('uploadError');
+    const clearBtn = document.getElementById('clearFilesBtn');
+    
+    selectedFilesList.style.display = 'block';
+    fileCount.textContent = files.length;
+    
+    // Show clear button
+    if (clearBtn) clearBtn.style.display = 'inline-block';
+    
+    // Separate by type
+    const csvFiles = files.filter(f => f.name.toLowerCase().endsWith('.csv'));
+    const videoFiles = files.filter(f => {
+        const name = f.name.toLowerCase();
+        return name.endsWith('.mp4') || name.endsWith('.webm') || 
+               name.endsWith('.mov') || name.endsWith('.avi');
+    });
+    
+    console.log('CSVs:', csvFiles.length, 'Videos:', videoFiles.length);
+    
+    // Validate in single mode
+    if (uploadMode === 'single') {
+        if (csvFiles.length !== 1 || videoFiles.length !== 1) {
+            if (csvFiles.length === 0 && videoFiles.length === 0) {
+                uploadError.textContent = 'Please select 1 video and 1 CSV file';
+            } else if (csvFiles.length === 0) {
+                uploadError.textContent = `✓ VIDEO selected. Now drop a CSV FILE (not another video!).`;
+            } else if (videoFiles.length === 0) {
+                uploadError.textContent = `✓ CSV selected. Now drop a VIDEO FILE (.mp4, .mov, .webm, .avi).`;
+            } else {
+                uploadError.textContent = 'Too many files. Single mode needs exactly 1 CSV + 1 video';
+            }
+            uploadError.style.color = '#f59e0b';
+            uploadError.style.fontWeight = 'bold';
+            submitBtn.disabled = true;
+        } else {
+            // Have exactly 1 CSV and 1 video - check names
+            const csvName = csvFiles[0].name.replace(/\.(csv)$/i, '').replace(/_split$/i, '');
+            const videoName = videoFiles[0].name.replace(/\.(mp4|webm|mov|avi)$/i, '');
+            
+            if (csvName !== videoName) {
+                uploadError.textContent = `⚠️ Names don't match! CSV: "${csvName}" vs Video: "${videoName}"`;
+                uploadError.style.color = '#f59e0b';
+            } else {
+                uploadError.textContent = '✓ Ready to upload! Names match perfectly.';
+                uploadError.style.color = '#10b981';
+            }
+            submitBtn.disabled = false;
+        }
+    } else {
+        // Bulk mode info
+        if (csvFiles.length > 0 && videoFiles.length > 0) {
+            uploadError.textContent = `✓ Ready: ${csvFiles.length} CSVs, ${videoFiles.length} videos`;
+            uploadError.style.color = '#10b981';
+            submitBtn.disabled = false;
+        } else if (csvFiles.length > 0) {
+            uploadError.textContent = `✓ ${csvFiles.length} CSVs selected. Add videos folder for pairing.`;
+            uploadError.style.color = '#f59e0b';
+            submitBtn.disabled = false; // Allow uploading CSVs without videos
+        } else if (videoFiles.length > 0) {
+            uploadError.textContent = `✓ ${videoFiles.length} videos selected. Add CSVs folder for pairing.`;
+            uploadError.style.color = '#f59e0b';
+            submitBtn.disabled = false;
+        } else {
+            uploadError.textContent = '';
+            submitBtn.disabled = true;
+        }
+    }
+    
+    filesList.innerHTML = `
+        ${csvFiles.length > 0 ? `<div class="file-type-group">
+            <strong>📄 CSV Files (${csvFiles.length}):</strong>
+            ${csvFiles.map(f => `<div class="file-item">${f.name} (${(f.size / 1024).toFixed(1)} KB)</div>`).join('')}
+        </div>` : ''}
+        ${videoFiles.length > 0 ? `<div class="file-type-group">
+            <strong>🎥 Video Files (${videoFiles.length}):</strong>
+            ${videoFiles.map(f => `<div class="file-item">${f.name} (${(f.size / 1024 / 1024).toFixed(1)} MB)</div>`).join('')}
+        </div>` : ''}
+    `;
+    
+    submitBtn.disabled = false;
+    
+    // Store files for upload
+    window.selectedFiles = files;
+}
+
+function clearSelectedFiles() {
+    console.log('Clearing selected files');
+    window.selectedFiles = null;
+    document.getElementById('selectedFilesList').style.display = 'none';
+    document.getElementById('uploadError').textContent = '';
+    document.getElementById('uploadError').style.color = '';
+    document.getElementById('uploadSubmitBtn').disabled = true;
+    
+    const filesList = document.getElementById('filesList');
+    if (filesList) filesList.innerHTML = '';
+    
+    const fileCount = document.getElementById('fileCount');
+    if (fileCount) fileCount.textContent = '0';
+    
+    const clearBtn = document.getElementById('clearFilesBtn');
+    if (clearBtn) clearBtn.style.display = 'none';
+}
+
+async function handleUpload(e) {
+    e.preventDefault();
+    
+    console.log('Upload triggered!');
+    console.log('Upload mode:', uploadMode);
+    console.log('Selected files:', window.selectedFiles);
+    
+    const files = window.selectedFiles || [];
+    if (files.length === 0) {
+        console.log('No files selected!');
+        document.getElementById('uploadError').textContent = 'Please select files to upload';
+        showNotification('Please select files to upload', 'error');
+        return;
+    }
+    
+    console.log('Starting upload with', files.length, 'files');
+    
+    const folderId = document.getElementById('uploadToFolder').value || null;
+    const folderName = folderId ? (folders.find(f => f.id === folderId)?.name || 'folder') : 'All Files';
+    
+    // Show progress
+    const progressDiv = document.getElementById('uploadProgress');
+    const progressBar = document.getElementById('progressBar');
+    const progressText = document.getElementById('progressText');
+    const submitBtn = document.getElementById('uploadSubmitBtn');
+    
+    progressDiv.style.display = 'block';
+    submitBtn.disabled = true;
+    
+    if (uploadMode === 'bulk') {
+        // Bulk upload: send all files at once
+        progressText.textContent = `Uploading ${files.length} files...`;
+        progressBar.style.width = '50%';
+        
+        const formData = new FormData();
+        files.forEach(file => {
+            formData.append('files', file);
+        });
+        if (folderId) {
+            formData.append('folderId', folderId);
+        }
+        
+        try {
+            console.log('Sending bulk upload request...');
+            const response = await fetch('/api/upload-bulk', {
+                method: 'POST',
+                body: formData
+            });
+            
+            console.log('Response status:', response.status);
+            console.log('Response headers:', response.headers.get('content-type'));
+            
+            if (response.ok) {
+                const results = await response.json();
+                progressBar.style.width = '100%';
+                
+                let message = `✓ Created ${results.created.length} file(s)`;
+                if (results.matched.length > 0) {
+                    message += `\n✓ Matched ${results.matched.length} video(s)`;
+                }
+                if (results.unmatched.csvs.length > 0) {
+                    message += `\n⚠ ${results.unmatched.csvs.length} CSV(s) without matching video`;
+                }
+                if (results.unmatched.videos.length > 0) {
+                    message += `\n⚠ ${results.unmatched.videos.length} video(s) without matching CSV (deleted)`;
+                }
+                if (results.errors.length > 0) {
+                    message += `\n❌ ${results.errors.length} error(s)`;
+                }
+                
+                progressText.textContent = message;
+                
+                // Show mismatches alert if any
+                if (results.unmatched.csvs.length > 0 || results.unmatched.videos.length > 0) {
+                    let alertMessage = 'Upload complete with mismatches:\n\n';
+                    
+                    if (results.unmatched.csvs.length > 0) {
+                        alertMessage += `CSVs without matching video (${results.unmatched.csvs.length}):\n`;
+                        results.unmatched.csvs.forEach(csv => {
+                            alertMessage += `  • ${csv}\n`;
+                        });
+                        alertMessage += '\n';
+                    }
+                    
+                    if (results.unmatched.videos.length > 0) {
+                        alertMessage += `Videos without matching CSV (deleted) (${results.unmatched.videos.length}):\n`;
+                        results.unmatched.videos.forEach(video => {
+                            alertMessage += `  • ${video}\n`;
+                        });
+                    }
+                    
+                    setTimeout(() => {
+                        alert(alertMessage);
+                    }, 500);
+                }
+                
+                setTimeout(() => {
+                    closeUploadModal();
+                    showNotification(`Bulk upload complete: ${results.created.length} files created`, 'success');
+                    loadFiles();
+                }, 2500);
+            } else {
+                console.error('Upload failed with status:', response.status);
+                const contentType = response.headers.get('content-type');
+                let errorMessage = 'Upload failed';
+                
+                if (contentType && contentType.includes('application/json')) {
+                    const error = await response.json();
+                    errorMessage = error.error || error.details || 'Upload failed';
+                    console.error('Error details:', error);
+                } else {
+                    const text = await response.text();
+                    console.error('Non-JSON response:', text.substring(0, 500));
+                    errorMessage = `Server error (${response.status})`;
+                }
+                
+                progressText.textContent = `Error: ${errorMessage}`;
+                submitBtn.disabled = false;
+            }
+        } catch (error) {
+            console.error('Upload exception:', error);
+            progressText.textContent = `Error: ${error.message}`;
+            submitBtn.disabled = false;
+        }
+    } else {
+        // Single mode: upload CSV first, then attach video
+        const csvFile = files.find(f => f.name.toLowerCase().endsWith('.csv'));
+        const videoFile = files.find(f => {
+            const name = f.name.toLowerCase();
+            return name.endsWith('.mp4') || name.endsWith('.webm') || 
+                   name.endsWith('.mov') || name.endsWith('.avi');
+        });
+        
+        // Validate names match
+        const csvName = csvFile.name.replace(/\.(csv)$/i, '').replace(/_split$/i, '');
+        const videoName = videoFile.name.replace(/\.(mp4|webm|mov|avi)$/i, '');
+        
+        if (csvName !== videoName) {
+            const proceed = confirm(`File names don't match!\nCSV: "${csvName}"\nVideo: "${videoName}"\n\nDo you want to proceed anyway?`);
+            if (!proceed) {
+                progressDiv.style.display = 'none';
+                submitBtn.disabled = false;
+                return;
+            }
+        }
+        
+        // Upload CSV
+        progressText.textContent = `Uploading CSV: ${csvFile.name}`;
+        progressBar.style.width = '30%';
+        
+        const csvFormData = new FormData();
+        csvFormData.append('file', csvFile);
+        if (folderId) {
+            csvFormData.append('folderId', folderId);
+        }
+        
+        try {
+            const csvResponse = await fetch('/api/upload', {
+                method: 'POST',
+                body: csvFormData
+            });
+            
+            if (csvResponse.ok) {
+                const csvResult = await csvResponse.json();
+                const fileId = csvResult.fileId;
+                
+                // Upload video
+                progressText.textContent = `Uploading video: ${videoFile.name}`;
+                progressBar.style.width = '70%';
+                
+                const videoFormData = new FormData();
+                videoFormData.append('video', videoFile);
+                
+                const videoResponse = await fetch(`/api/files/${fileId}/upload-video`, {
+                    method: 'POST',
+                    body: videoFormData
+                });
+                
+                if (videoResponse.ok) {
+                    progressBar.style.width = '100%';
+                    progressText.textContent = `Complete! CSV and video uploaded successfully`;
+                    
+                    setTimeout(() => {
+                        closeUploadModal();
+                        showNotification('File pair uploaded successfully', 'success');
+                        loadFiles();
+                    }, 1500);
+                } else {
+                    progressText.textContent = `CSV uploaded, but video upload failed`;
+                    submitBtn.disabled = false;
+                }
+            } else {
+                progressText.textContent = `CSV upload failed`;
+                submitBtn.disabled = false;
+            }
+        } catch (error) {
+            progressText.textContent = `Error: ${error.message}`;
+            submitBtn.disabled = false;
+        }
+    }
+}
+
+// Folder management
+async function loadFolders() {
+    try {
+        const response = await fetch('/api/folders');
+        folders = await response.json();
+        updateFolderSelects();
+    } catch (error) {
+        console.error('Error loading folders:', error);
+    }
+}
+
+function updateFolderSelects() {
+    const targetFolder = document.getElementById('targetFolder');
+    
+    const folderOptions = folders.map(f => `<option value="${f.id}">${f.name}</option>`).join('');
+    
+    if (targetFolder) {
+        targetFolder.innerHTML = '<option value="">All Files (No Folder)</option>' + folderOptions;
+    }
+}
+
+function copyShareUrl(url) {
+    navigator.clipboard.writeText(url);
+    showNotification('Share link copied to clipboard!', 'success');
+}
+
+function openCreateFolderModal() {
+    document.getElementById('createFolderModal').classList.add('active');
+    document.getElementById('folderError').textContent = '';
+    document.getElementById('folderName').focus();
+}
+
+function closeCreateFolderModal() {
+    document.getElementById('createFolderModal').classList.remove('active');
+    document.getElementById('createFolderForm').reset();
+}
+
+async function handleCreateFolder(e) {
+    e.preventDefault();
+    const name = document.getElementById('folderName').value.trim();
+    
+    try {
+        const response = await fetch('/api/folders', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name })
+        });
+        
+        if (response.ok) {
+            closeCreateFolderModal();
+            showNotification('Folder created successfully', 'success');
+            await loadFolders();
+            loadFiles();
+        } else {
+            document.getElementById('folderError').textContent = 'Failed to create folder';
+        }
+    } catch (error) {
+        document.getElementById('folderError').textContent = 'Failed to create folder';
+    }
+}
+
+function openAssignFolderModal(event, fileId) {
+    event.stopPropagation();
+    fileToMove = fileId;
+    document.getElementById('assignFolderModal').classList.add('active');
+}
+
+function closeAssignFolderModal() {
+    document.getElementById('assignFolderModal').classList.remove('active');
+    fileToMove = null;
+}
+
+async function assignToFolder() {
+    if (!fileToMove) return;
+    
+    const folderId = document.getElementById('targetFolder').value || null;
+    
+    try {
+        const response = await fetch(`/api/files/${fileToMove}/folder`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ folderId })
+        });
+        
+        if (response.ok) {
+            closeAssignFolderModal();
+            showNotification('File moved successfully', 'success');
+            loadFiles();
+        }
+    } catch (error) {
+        showNotification('Error moving file', 'error');
+    }
+}
+
+// File management
+async function loadFiles() {
+    try {
+        const response = await fetch('/api/files');
+        const allFiles = await response.json();
+        
+        console.log('Loaded files:', allFiles);
+        
+        // Render explorer view
+        renderFolderExplorer(allFiles);
+    } catch (error) {
+        console.error('Error loading files:', error);
+    }
+}
+
+function toggleGroupView() {
+    const isGrouped = document.getElementById('groupViewToggle').checked;
+    loadFiles(); // Reload with grouping
+}
+
+function renderFolderExplorer(allFiles) {
+    // If viewing shared folder, only show that folder's content
+    if (selectedFolder) {
+        const folderFiles = allFiles.filter(f => f.folderId === selectedFolder);
+        const folder = folders.find(f => f.id === selectedFolder);
+        
+        const foldersContainer = document.getElementById('foldersContainer');
+        const allFilesSection = document.querySelector('.explorer-section');
+        
+        // Hide "All Files" section
+        if (allFilesSection) {
+            allFilesSection.style.display = 'none';
+        }
+        
+        // Show only the selected folder
+        if (folder) {
+            foldersContainer.innerHTML = `
+                <div class="explorer-section">
+                    <div class="explorer-header">
+                        <span class="toggle-icon">▼</span>
+                        <strong>📁 ${folder.name}</strong>
+                        <span class="file-count-badge">${folderFiles.length}</span>
+                    </div>
+                    <div id="folder_${folder.id}" class="explorer-content">
+                        <div class="file-grid">
+                            ${folderFiles.length === 0 ? 
+                                '<p class="loading" style="margin: 10px 0;">No files in this folder</p>' :
+                                folderFiles.map(file => renderFileCard(file)).join('')
+                            }
+                        </div>
+                    </div>
+                </div>
+            `;
+        }
+        return;
+    }
+    
+    // Normal view: show all folders
+    // Group files by folder
+    const unorganized = allFiles.filter(f => !f.folderId);
+    const organized = {};
+    
+    allFiles.forEach(file => {
+        if (file.folderId) {
+            if (!organized[file.folderId]) {
+                organized[file.folderId] = [];
+            }
+            organized[file.folderId].push(file);
+        }
+    });
+    
+    // Render "All Files" section
+    const allFilesList = document.getElementById('allFilesList');
+    if (unorganized.length === 0) {
+        allFilesList.innerHTML = '<p class="loading" style="margin: 10px 0;">No unorganized files. Drag files here to remove from folders.</p>';
+    } else {
+        allFilesList.innerHTML = unorganized.map(file => renderFileCard(file)).join('');
+    }
+    document.getElementById('allFilesCount').textContent = unorganized.length;
+    
+    // Make "All Files" section a drop target
+    const allFilesContent = document.getElementById('allFilesContent');
+    setupDropZone(allFilesContent, null);
+    
+    // Render folder sections
+    const foldersContainer = document.getElementById('foldersContainer');
+    if (folders.length === 0) {
+        foldersContainer.innerHTML = '';
+    } else {
+        foldersContainer.innerHTML = folders.map(folder => {
+            const folderFiles = organized[folder.id] || [];
+            const shareUrl = `${window.location.origin}/folder/${folder.id}`;
+            
+            return `
+                <div class="explorer-section">
+                    <div class="explorer-header" onclick="toggleSection('folder_${folder.id}')">
+                        <span class="toggle-icon">▼</span>
+                        <strong>📁 ${folder.name}</strong>
+                        <span class="file-count-badge">${folderFiles.length}</span>
+                        ${isAdmin ? `
+                            <div class="folder-actions">
+                                <button class="btn btn-secondary btn-sm" onclick="event.stopPropagation(); copyShareUrl('${shareUrl}')">🔗 Copy Link</button>
+                                <button class="btn btn-danger btn-sm" onclick="event.stopPropagation(); deleteFolder('${folder.id}')">Delete</button>
+                            </div>
+                        ` : ''}
+                    </div>
+                    <div id="folder_${folder.id}" class="explorer-content" data-folder-id="${folder.id}">
+                        <div class="file-grid">
+                            ${folderFiles.length === 0 ? 
+                                '<p class="loading" style="margin: 10px 0;">Drop files here to add them to this folder</p>' :
+                                folderFiles.map(file => renderFileCard(file)).join('')
+                            }
+                        </div>
+                    </div>
+                </div>
+            `;
+        }).join('');
+        
+        // Setup drop zones for all folders
+        folders.forEach(folder => {
+            const folderContent = document.getElementById(`folder_${folder.id}`);
+            if (folderContent) {
+                setupDropZone(folderContent, folder.id);
+            }
+        });
+    }
+    
+    // Make file cards draggable
+    if (isAdmin) {
+        setTimeout(() => {
+            document.querySelectorAll('.file-card').forEach(card => {
+                card.setAttribute('draggable', 'true');
+                card.addEventListener('dragstart', handleDragStart);
+                card.addEventListener('dragend', handleDragEnd);
+            });
+        }, 100);
+    }
+}
+
+// Drag and Drop functionality
+let draggedFileId = null;
+
+function handleDragStart(e) {
+    draggedFileId = e.currentTarget.getAttribute('onclick').match(/openFile\('([^']+)'\)/)[1];
+    e.currentTarget.style.opacity = '0.5';
+    e.dataTransfer.effectAllowed = 'move';
+}
+
+function handleDragEnd(e) {
+    e.currentTarget.style.opacity = '1';
+}
+
+function setupDropZone(element, folderId) {
+    element.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        element.style.background = '#ede9fe';
+    });
+    
+    element.addEventListener('dragleave', (e) => {
+        element.style.background = '';
+    });
+    
+    element.addEventListener('drop', async (e) => {
+        e.preventDefault();
+        element.style.background = '';
+        
+        if (!draggedFileId) return;
+        
+        try {
+            const response = await fetch(`/api/files/${draggedFileId}/folder`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ folderId: folderId })
+            });
+            
+            if (response.ok) {
+                const folderName = folderId ? (folders.find(f => f.id === folderId)?.name || 'folder') : 'All Files';
+                showNotification(`File moved to ${folderName}`, 'success');
+                loadFiles();
+            }
+        } catch (error) {
+            showNotification('Error moving file', 'error');
+        }
+        
+        draggedFileId = null;
+    });
+}
+
+function renderFileCard(file) {
+    // Remove .csv extension from display name
+    const displayName = file.name.replace(/\.csv$/i, '');
+    
+    const videoBadge = file.hasVideo ? '<span class="video-badge">🎥</span>' : '';
+    const commentBadge = file.commentCount > 0 ? `<span class="comment-badge">💬 ${file.commentCount}</span>` : '';
+    
+    // Thumbnail display
+    let thumbnailHtml = '';
+    if (file.thumbnailFile) {
+        thumbnailHtml = `<div class="file-thumbnail"><img src="/api/thumbnails/${file.thumbnailFile}" alt="Video thumbnail" onerror="this.parentElement.innerHTML='<div class=\\'thumbnail-placeholder\\'>🎥</div>'"></div>`;
+    } else if (file.hasVideo) {
+        thumbnailHtml = '<div class="file-thumbnail"><div class="thumbnail-placeholder">🎥</div></div>';
+    } else {
+        thumbnailHtml = '<div class="file-thumbnail"><div class="thumbnail-placeholder">📄</div></div>';
+    }
+    
+    // Checkbox for bulk selection (admin only)
+    const isSelected = selectedFiles.has(file.id);
+    const checkboxHtml = isAdmin ? `
+        <input type="checkbox" 
+               class="file-select-checkbox" 
+               data-file-id="${file.id}"
+               ${isSelected ? 'checked' : ''}
+               onchange="event.stopPropagation(); toggleFileSelection('${file.id}');"
+               onclick="event.stopPropagation();">
+    ` : '';
+    
+    return `
+        <div class="file-card ${file.completed ? 'completed' : ''} ${selectedFiles.has(file.id) ? 'selected' : ''}" onclick="openFile('${file.id}')">
+            ${checkboxHtml}
+            ${thumbnailHtml}
+            <div class="file-card-content">
+                <div class="file-card-left">
+                    <span class="completion-badge ${file.completed ? 'completed' : 'in-progress'}">
+                        ${file.completed ? '✓' : '⏳'}
+                    </span>
+                    <div class="file-card-title">
+                        <div class="file-name-with-badges">
+                            <h3>${displayName}</h3>
+                            <div class="file-badges">
+                                ${videoBadge}
+                                ${commentBadge}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                <div class="file-card-right">
+                    <div class="file-info">
+                        <span>📊 ${file.rowCount} rows</span>
+                        <span>📅 ${new Date(file.uploadDate).toLocaleDateString()}</span>
+                    </div>
+                    ${isAdmin ? `
+                        <div class="file-actions">
+                            <button class="btn-icon btn-move" onclick="openAssignFolderModal(event, '${file.id}')" title="Move to folder">📁</button>
+                            <button class="btn-icon btn-delete" onclick="deleteFile(event, '${file.id}')" title="Delete file">🗑️</button>
+                        </div>
+                    ` : ''}
+                </div>
+            </div>
+        </div>
+    `;
+}
+
+function toggleSection(sectionId) {
+    const content = document.getElementById(sectionId + 'Content') || document.getElementById(sectionId);
+    if (!content) return;
+    
+    const section = content.closest('.explorer-section');
+    const header = section ? section.querySelector('.explorer-header') : content.previousElementSibling;
+    
+    if (content.classList.contains('collapsed')) {
+        content.classList.remove('collapsed');
+        if (header) header.classList.remove('collapsed');
+    } else {
+        content.classList.add('collapsed');
+        if (header) header.classList.add('collapsed');
+    }
+}
+
+async function deleteFolder(folderId) {
+    if (!confirm('Delete this folder? Files will be moved to "All Files".')) return;
+    
+    try {
+        const response = await fetch(`/api/folders/${folderId}`, {
+            method: 'DELETE'
+        });
+        
+        if (response.ok) {
+            showNotification('Folder deleted successfully', 'success');
+            await loadFolders();
+            loadFiles();
+        }
+    } catch (error) {
+        showNotification('Error deleting folder', 'error');
+    }
+}
+
+async function openFile(fileId) {
+    // Toggle: if same file is clicked, close editor
+    if (currentFileId === fileId) {
+        closeEditor();
+        return;
+    }
+    
+    try {
+        const response = await fetch(`/api/files/${fileId}`);
+        const fileData = await response.json();
+
+        currentFileId = fileId;
+        currentData = fileData.data;
+        isCompleted = fileData.completed || false;
+        currentVideoFile = fileData.videoFile || null;
+        videoComments = fileData.videoComments || [];
+
+        console.log('File opened:', fileData.originalName);
+        console.log('Video file:', currentVideoFile);
+
+        document.getElementById('currentFileName').textContent = fileData.originalName.replace(/\.csv$/i, '');
+        document.getElementById('completionCheckbox').checked = isCompleted;
+        
+        // Set video mode as default if there's a video
+        if (currentVideoFile) {
+            videoMode = 'full';
+        } else {
+            videoMode = 'hover'; // Table mode if no video
+        }
+        
+        // Show editor as modal
+        const editorSection = document.getElementById('editorSection');
+        editorSection.style.display = 'block';
+        editorSection.classList.add('editor-modal-active');
+        document.body.style.overflow = 'hidden'; // Prevent background scrolling
+        
+        // Setup video section (this will update UI based on videoMode)
+        setupVideoSection();
+        
+        renderTable();
+        updateStats();
+        
+        // Render caption check table by default (in video mode)
+        renderCaptionCheckTable();
+        
+        // Regenerate split captions if toggle is enabled
+        const splitToggle = document.getElementById('splitCaptionsToggle');
+        if (splitToggle && splitToggle.checked) {
+            generateSplitCaptions();
+        }
+        
+        // Initialize mode toggle labels (Caption Checking Mode is default)
+        const videoCommentsMode = document.getElementById('videoCommentsMode');
+        const modeLabelLeft = document.getElementById('modeLabelLeft');
+        const modeLabelRight = document.getElementById('modeLabelRight');
+        if (videoCommentsMode && !videoCommentsMode.checked) {
+            if (modeLabelLeft) modeLabelLeft.classList.add('active');
+            if (modeLabelRight) modeLabelRight.classList.remove('active');
+        }
+        
+        // Hide elements for shared folder view
+        updateUIForSharedMode();
+    } catch (error) {
+        showNotification('Error loading file', 'error');
+    }
+}
+
+// Check if we're in shared folder mode (viewing via /folder/:id URL and not admin)
+function isSharedMode() {
+    return selectedFolder !== null && !isAdmin;
+}
+
+// Hide/show elements based on shared mode
+function updateUIForSharedMode() {
+    const sharedMode = isSharedMode();
+    
+    // Elements to hide in shared mode
+    const elementsToHide = [
+        { id: 'filterKeep', type: 'label' },
+        { id: 'filterCut', type: 'label' },
+        { id: 'statsKeep', type: 'element' },
+        { id: 'statsCut', type: 'element' },
+        { id: 'statsKeepDuration', type: 'element' },
+        { id: 'columnToggleBtn', type: 'element' },
+        { id: 'exportCommentsBtn', type: 'element' },
+        { id: 'downloadSplitCaptionsBtn', type: 'element' }
+    ];
+    
+    elementsToHide.forEach(item => {
+        const element = document.getElementById(item.id);
+        if (element) {
+            // For labels, hide the parent label element
+            if (item.type === 'label') {
+                const label = element.closest('label');
+                if (label) label.style.display = sharedMode ? 'none' : '';
+            } else {
+                element.style.display = sharedMode ? 'none' : '';
+            }
+        }
+    });
+    
+    // Hide/show filter-controls container based on visibility
+    const filterControls = document.querySelector('.filter-controls');
+    if (filterControls) {
+        if (sharedMode) {
+            filterControls.style.display = 'none';
+        } else {
+            filterControls.style.display = '';
+        }
+    }
+}
+
+async function deleteFile(event, fileId) {
+    event.stopPropagation();
+    
+    if (!confirm('Are you sure you want to delete this file?')) return;
+
+    try {
+        const response = await fetch(`/api/files/${fileId}`, {
+            method: 'DELETE'
+        });
+
+        if (response.ok) {
+            showNotification('File deleted successfully', 'success');
+            loadFiles();
+            if (currentFileId === fileId) {
+                closeEditor();
+            }
+        }
+    } catch (error) {
+        showNotification('Error deleting file', 'error');
+    }
+}
+
+// Column visibility management
+function initializeColumnVisibility() {
+    if (currentData.length === 0) return;
+    
+    const columns = Object.keys(currentData[0]);
+    
+    // Initialize all columns as visible if not already set
+    // Hide start_time and end_time by default (we use start_seconds/end_seconds instead)
+    columns.forEach(col => {
+        if (columnVisibility[col] === undefined) {
+            if (col === 'start_time' || col === 'end_time') {
+                columnVisibility[col] = false; // Hide these by default
+            } else {
+                columnVisibility[col] = true;
+            }
+        }
+    });
+    
+    // Render column toggle panel
+    const columnToggles = document.getElementById('columnToggles');
+    columnToggles.innerHTML = columns.map(col => `
+        <label>
+            <input type="checkbox" 
+                   class="column-toggle" 
+                   data-column="${col}" 
+                   ${columnVisibility[col] ? 'checked' : ''}>
+            ${col}
+        </label>
+    `).join('');
+    
+    // Add event listeners
+    document.querySelectorAll('.column-toggle').forEach(checkbox => {
+        checkbox.addEventListener('change', (e) => {
+            const column = e.target.dataset.column;
+            columnVisibility[column] = e.target.checked;
+            applyColumnVisibility();
+        });
+    });
+}
+
+function toggleColumnPanel() {
+    const panel = document.getElementById('columnPanel');
+    panel.style.display = panel.style.display === 'none' ? 'block' : 'none';
+}
+
+function applyColumnVisibility() {
+    const columns = Object.keys(currentData[0]);
+    
+    columns.forEach((col, index) => {
+        const isVisible = columnVisibility[col];
+        const cells = document.querySelectorAll(`th:nth-child(${index + 1}), td:nth-child(${index + 1})`);
+        
+        cells.forEach(cell => {
+            if (isVisible) {
+                cell.classList.remove('hidden-column');
+            } else {
+                cell.classList.add('hidden-column');
+            }
+        });
+    });
+}
+
+// Table rendering
+function renderTable() {
+    if (currentData.length === 0) return;
+
+    const columns = Object.keys(currentData[0]);
+    const thead = document.getElementById('tableHead');
+    const tbody = document.getElementById('tableBody');
+
+    // Initialize column visibility
+    initializeColumnVisibility();
+
+    // Render header
+    thead.innerHTML = `
+        <tr>
+            ${columns.map(col => `<th>${col}</th>`).join('')}
+        </tr>
+    `;
+
+    // Render body
+    renderTableBody();
+    
+    // Apply column visibility
+    applyColumnVisibility();
+}
+
+function renderTableBody() {
+    const tbody = document.getElementById('tableBody');
+    const columns = Object.keys(currentData[0]);
+    const filterKeep = document.getElementById('filterKeep').checked;
+    const filterCut = document.getElementById('filterCut').checked;
+
+    const filteredData = currentData.filter(row => {
+        const action = row.action ? row.action.toLowerCase() : '';
+        if (action === 'keep' && !filterKeep) return false;
+        if (action === 'cut' && !filterCut) return false;
+        return true;
+    });
+
+    tbody.innerHTML = filteredData.map((row, index) => {
+        const actualIndex = currentData.indexOf(row);
+        const action = row.action ? row.action.toLowerCase() : '';
+        const hasVideo = currentVideoFile ? 'has-video' : '';
+        
+        return `
+            <tr class="row-${action}" 
+                data-index="${actualIndex}"
+                onclick="highlightRow(${actualIndex})">
+                ${columns.map(col => {
+                    if (col === 'action') {
+                        return `
+                            <td class="action-cell">
+                                <button class="action-toggle ${action}" onclick="toggleAction(${actualIndex}); event.stopPropagation();">
+                                    ${action.toUpperCase()}
+                                </button>
+                            </td>
+                        `;
+                    } else if (col === 'reason') {
+                        return `
+                            <td>
+                                <input type="text" class="reason-input" value="${row[col] || ''}" 
+                                    onchange="updateReason(${actualIndex}, this.value)"
+                                    onclick="event.stopPropagation()">
+                            </td>
+                        `;
+                    } else if (col === 'text') {
+                        return `
+                            <td class="text-cell ${hasVideo}"
+                                onmouseenter="playVideoSegment(${actualIndex})" 
+                                onmouseleave="stopVideoSegment()">
+                                <input type="text" class="reason-input" value="${row[col] || ''}" 
+                                    onchange="updateText(${actualIndex}, this.value)"
+                                    onclick="event.stopPropagation()">
+                            </td>
+                        `;
+                    } else {
+                        return `<td>${row[col] || ''}</td>`;
+                    }
+                }).join('')}
+            </tr>
+        `;
+    }).join('');
+}
+
+function toggleAction(index) {
+    const currentAction = currentData[index].action ? currentData[index].action.toLowerCase() : 'keep';
+    currentData[index].action = currentAction === 'keep' ? 'cut' : 'keep';
+    renderTableBody();
+    updateStats();
+}
+
+function updateReason(index, value) {
+    currentData[index].reason = value;
+}
+
+function updateText(index, value) {
+    currentData[index].text = value;
+}
+
+function applyFilters() {
+    renderTableBody();
+}
+
+function updateStats() {
+    const keepCount = currentData.filter(row => row.action && row.action.toLowerCase() === 'keep').length;
+    const cutCount = currentData.filter(row => row.action && row.action.toLowerCase() === 'cut').length;
+    
+    // Calculate durations
+    let keepDuration = 0;
+    let totalDuration = 0;
+    
+    currentData.forEach(row => {
+        const duration = parseFloat(row.duration);
+        if (!isNaN(duration)) {
+            totalDuration += duration;
+            
+            if (row.action && row.action.toLowerCase() === 'keep') {
+                keepDuration += duration;
+            }
+        }
+    });
+
+    document.getElementById('statsKeep').textContent = `Keep: ${keepCount}`;
+    document.getElementById('statsCut').textContent = `Cut: ${cutCount}`;
+    document.getElementById('statsKeepDuration').textContent = `Keep Duration: ${keepDuration.toFixed(2)}s`;
+    document.getElementById('statsTotalDuration').textContent = `Total Duration: ${totalDuration.toFixed(2)}s`;
+}
+
+// Completion toggle
+function toggleCompletion() {
+    isCompleted = document.getElementById('completionCheckbox').checked;
+    // Don't auto-save, let user click Save Changes button
+}
+
+// Save and download
+async function saveChanges() {
+    if (!currentFileId) return;
+
+    // Clear any pending save
+    if (saveTimeout) {
+        clearTimeout(saveTimeout);
+    }
+
+    // Debounce: wait 500ms before actually saving
+    saveTimeout = setTimeout(async () => {
+        // Get current completion status from checkbox
+        isCompleted = document.getElementById('completionCheckbox').checked;
+        
+        console.log('Saving file:', currentFileId);
+        console.log('Completed status:', isCompleted);
+
+        try {
+            const payload = { 
+                data: currentData,
+                completed: isCompleted
+            };
+            
+            console.log('Sending payload:', JSON.stringify(payload, null, 2).substring(0, 200) + '...');
+            
+            const response = await fetch(`/api/files/${currentFileId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            if (response.ok) {
+                const result = await response.json();
+                console.log('Save successful:', result);
+                showNotification('Changes saved successfully', 'success');
+                // Refresh file list to show updated completion status
+                await loadFiles();
+            } else {
+                // Handle different error statuses
+                if (response.status === 429) {
+                    const errorText = await response.text();
+                    showNotification('Too many requests. Please wait a moment before saving again.', 'error');
+                    console.error('Rate limit exceeded:', errorText);
+                } else {
+                    try {
+                        const errorData = await response.json();
+                        console.error('Save failed:', errorData);
+                        showNotification('Error saving changes', 'error');
+                    } catch (parseError) {
+                        const errorText = await response.text();
+                        console.error('Save failed (non-JSON):', errorText);
+                        showNotification('Error saving changes', 'error');
+                    }
+                }
+            }
+        } catch (error) {
+            console.error('Save error:', error);
+            if (error.message && error.message.includes('429')) {
+                showNotification('Too many requests. Please wait a moment before saving again.', 'error');
+            } else {
+                showNotification('Error saving changes', 'error');
+            }
+        }
+        
+        saveTimeout = null;
+    }, 500); // Wait 500ms before saving
+}
+
+async function downloadFile() {
+    if (!currentFileId) return;
+
+    try {
+        const response = await fetch(`/api/files/${currentFileId}/download`);
+        if (response.ok) {
+            const blob = await response.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = document.getElementById('currentFileName').textContent;
+            a.click();
+            window.URL.revokeObjectURL(url);
+            showNotification('File downloaded successfully', 'success');
+        } else {
+            showNotification('Error downloading file', 'error');
+        }
+    } catch (error) {
+        showNotification('Error downloading file', 'error');
+    }
+}
+
+async function exportSrt() {
+    if (!currentFileId) return;
+
+    try {
+        const response = await fetch(`/api/files/${currentFileId}/export-srt`);
+        if (response.ok) {
+            const blob = await response.blob();
+            const url = window.URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            const filename = document.getElementById('currentFileName').textContent.replace(/\.csv$/i, '.srt');
+            a.download = filename;
+            a.click();
+            window.URL.revokeObjectURL(url);
+            showNotification('SRT file exported successfully', 'success');
+        } else {
+            showNotification('Error exporting SRT file', 'error');
+        }
+    } catch (error) {
+        console.error('Export SRT error:', error);
+        showNotification('Error exporting SRT file', 'error');
+    }
+}
+
+async function downloadSplitCaptions() {
+    if (splitCaptions.length === 0) {
+        showNotification('No split captions to download. Enable split captions first.', 'error');
+        return;
+    }
+
+    try {
+        // Convert split captions to CSV format
+        const headers = ['segment', 'start_seconds', 'end_seconds', 'text'];
+        const csvRows = [headers.join(',')];
+        
+        splitCaptions.forEach((caption, index) => {
+            const row = [
+                index + 1,
+                caption.start_seconds.toFixed(3),
+                caption.end_seconds.toFixed(3),
+                `"${(caption.text || '').replace(/"/g, '""')}"`
+            ];
+            csvRows.push(row.join(','));
+        });
+        
+        const csvContent = csvRows.join('\n');
+        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        const filename = document.getElementById('currentFileName').textContent.replace(/\.csv$/i, '_split.csv');
+        a.download = filename;
+        a.click();
+        window.URL.revokeObjectURL(url);
+        showNotification('Split captions downloaded successfully', 'success');
+    } catch (error) {
+        console.error('Download split captions error:', error);
+        showNotification('Error downloading split captions', 'error');
+    }
+}
+
+// Video functionality
+function setupVideoSection() {
+    const fullVideoSection = document.getElementById('fullVideoSection');
+    
+    if (currentVideoFile) {
+        // Load videos in both players
+        hoverVideoElement.src = `/api/videos/${currentVideoFile}`;
+        fullVideoElement.src = `/api/videos/${currentVideoFile}`;
+        
+        // Scale caption based on video dimensions when video loads
+        fullVideoElement.addEventListener('loadedmetadata', updateCaptionSize);
+        fullVideoElement.addEventListener('resize', updateCaptionSize);
+        
+        // Show full video section if video exists
+        fullVideoSection.style.display = videoMode === 'full' ? 'block' : 'none';
+    } else {
+        fullVideoSection.style.display = 'none';
+    }
+    
+    updateVideoModeUI();
+}
+
+function updateCaptionSize() {
+    if (!fullVideoElement) return;
+    
+    const captionDiv = document.getElementById('videoCaption');
+    if (!captionDiv) return;
+    
+    // Get video's natural dimensions (1090x1920 for your videos)
+    const videoWidth = fullVideoElement.videoWidth || 1090;
+    const videoHeight = fullVideoElement.videoHeight || 1920;
+    
+    // Get displayed dimensions
+    const displayedHeight = fullVideoElement.clientHeight || fullVideoElement.offsetHeight;
+    
+    // Premiere Pro settings: 55px font on 1920px height video
+    // Calculate scale factor based on displayed height
+    const scaleFactor = displayedHeight / videoHeight;
+    const baseFontSize = 55; // Premiere Pro font size
+    const baseStroke = 5; // Premiere Pro stroke size
+    
+    // Apply scaled font size and stroke
+    const scaledFontSize = baseFontSize * scaleFactor;
+    const scaledStroke = Math.max(1, baseStroke * scaleFactor);
+    
+    captionDiv.style.fontSize = `${scaledFontSize}px`;
+    
+    // Create text-shadow outline effect (better than webkit-text-stroke)
+    // Use a single layer of shadows for a clean outline
+    const strokeWidth = Math.round(scaledStroke);
+    const shadows = [];
+    
+    // Create outline with just one layer in 8 directions (not multiple layers)
+    shadows.push(`${strokeWidth}px 0 0 #373737`);      // Right
+    shadows.push(`${-strokeWidth}px 0 0 #373737`);     // Left
+    shadows.push(`0 ${strokeWidth}px 0 #373737`);      // Down
+    shadows.push(`0 ${-strokeWidth}px 0 #373737`);     // Up
+    shadows.push(`${strokeWidth}px ${strokeWidth}px 0 #373737`); // Bottom-right
+    shadows.push(`${-strokeWidth}px ${strokeWidth}px 0 #373737`); // Bottom-left
+    shadows.push(`${strokeWidth}px ${-strokeWidth}px 0 #373737`); // Top-right
+    shadows.push(`${-strokeWidth}px ${-strokeWidth}px 0 #373737`); // Top-left
+    
+    captionDiv.style.textShadow = shadows.join(', ');
+    captionDiv.style.webkitTextFillColor = '#F7F6F2';
+    captionDiv.style.color = '#F7F6F2';
+}
+
+function toggleVideoMode() {
+    console.log('Toggle video mode clicked. Current:', videoMode);
+    videoMode = videoMode === 'hover' ? 'full' : 'hover';
+    console.log('New mode:', videoMode);
+    updateVideoModeUI();
+}
+
+function updateVideoModeUI() {
+    const fullVideoSection = document.getElementById('fullVideoSection');
+    const videoModeBtn = document.getElementById('videoModeBtn');
+    const tableContainer = document.querySelector('.table-container');
+    
+    console.log('updateVideoModeUI called');
+    console.log('Video mode:', videoMode);
+    console.log('Table container found:', !!tableContainer);
+    console.log('Full video section found:', !!fullVideoSection);
+    
+    if (!videoModeBtn || !fullVideoSection) {
+        console.error('Missing elements!');
+        return;
+    }
+    
+    if (currentVideoFile) {
+        videoModeBtn.style.display = 'inline-block';
+        
+        if (videoMode === 'full') {
+            // Video Mode: Show video editor, hide main table
+            fullVideoSection.style.display = 'block';
+            if (tableContainer) {
+                tableContainer.style.display = 'none';
+                console.log('Table HIDDEN in video mode');
+            }
+            videoModeBtn.textContent = 'Table Mode';
+            // Update caption size after showing video
+            setTimeout(() => updateCaptionSize(), 100);
+        } else {
+            // Table Mode: Hide video editor, show main table
+            fullVideoSection.style.display = 'none';
+            if (tableContainer) {
+                tableContainer.style.display = 'block';
+                console.log('Table SHOWN in table mode');
+            }
+            videoModeBtn.textContent = 'Video Mode';
+        }
+    } else {
+        videoModeBtn.style.display = 'none';
+        fullVideoSection.style.display = 'none';
+        if (tableContainer) tableContainer.style.display = 'block';
+    }
+}
+
+async function handleVideoUpload(e) {
+    e.preventDefault();
+    
+    const fileInput = document.getElementById('videoInput');
+    const file = fileInput.files[0];
+    
+    if (!file) return;
+    
+    const formData = new FormData();
+    formData.append('video', file);
+    
+    try {
+        const response = await fetch(`/api/files/${currentFileId}/upload-video`, {
+            method: 'POST',
+            body: formData
+        });
+        
+        if (response.ok) {
+            const result = await response.json();
+            currentVideoFile = result.videoFile;
+            setupVideoSection();
+            showNotification('Video uploaded successfully', 'success');
+        } else {
+            showNotification('Error uploading video', 'error');
+        }
+    } catch (error) {
+        console.error('Video upload error:', error);
+        showNotification('Error uploading video', 'error');
+    }
+}
+
+function playVideoSegment(index) {
+    if (!currentVideoFile || !hoverVideoElement) return;
+    
+    const row = currentData[index];
+    const startTime = parseFloat(row.start_seconds || 0);
+    const endTime = parseFloat(row.end_seconds || 0);
+    
+    if (endTime <= startTime) return;
+    
+    // Show hover video player
+    document.getElementById('hoverVideoPlayer').style.display = 'block';
+    
+    // Set video to start time
+    hoverVideoElement.currentTime = startTime;
+    hoverVideoElement.play().catch(err => console.log('Play error:', err));
+    
+    // Loop the segment
+    clearInterval(videoPlayInterval);
+    videoPlayInterval = setInterval(() => {
+        if (hoverVideoElement.currentTime >= endTime) {
+            hoverVideoElement.currentTime = startTime;
+        }
+    }, 50);
+}
+
+function stopVideoSegment() {
+    clearInterval(videoPlayInterval);
+    if (hoverVideoElement) {
+        hoverVideoElement.pause();
+    }
+    document.getElementById('hoverVideoPlayer').style.display = 'none';
+}
+
+function updateTimestampDisplay() {
+    if (!fullVideoElement) {
+        console.log('No fullVideoElement');
+        return;
+    }
+    
+    const currentTime = fullVideoElement.currentTime;
+    const hours = Math.floor(currentTime / 3600);
+    const minutes = Math.floor((currentTime % 3600) / 60);
+    const seconds = Math.floor(currentTime % 60);
+    const millis = Math.floor((currentTime % 1) * 1000);
+    
+    const timeString = `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}.${String(millis).padStart(3, '0')}`;
+    const timestampDisplay = document.getElementById('currentTimestamp');
+    if (timestampDisplay) timestampDisplay.textContent = timeString;
+    
+    // Find which segment we're in
+    const currentSegment = findSegmentAtTime(currentTime);
+    const captionDiv = document.getElementById('videoCaption');
+    const showCaptionsToggle = document.getElementById('showCaptionsToggle');
+    
+    console.log('Time:', currentTime.toFixed(2), 'Segment found:', !!currentSegment, 'Caption div:', !!captionDiv, 'Toggle checked:', showCaptionsToggle?.checked);
+    
+    if (currentSegment) {
+        console.log('Current segment text:', currentSegment.text);
+        
+        // Update video caption overlay
+        if (captionDiv && showCaptionsToggle && showCaptionsToggle.checked) {
+            captionDiv.textContent = currentSegment.text || '';
+            captionDiv.classList.add('visible');
+            console.log('Caption should be visible now');
+        } else if (captionDiv) {
+            captionDiv.classList.remove('visible');
+        }
+        
+        // Update caption check table highlight
+        updateCaptionCheckTableHighlight();
+    } else {
+        if (captionDiv) captionDiv.classList.remove('visible');
+        
+        // Clear highlight if no segment
+        const rows = document.querySelectorAll('#captionCheckBody tr');
+        rows.forEach(row => row.classList.remove('current-segment'));
+    }
+}
+
+function toggleCaptionDisplay() {
+    const captionDiv = document.getElementById('videoCaption');
+    const isChecked = document.getElementById('showCaptionsToggle').checked;
+    
+    if (!isChecked) {
+        captionDiv.classList.remove('visible');
+        captionDiv.textContent = '';
+    }
+    // If checked, the timeupdate event will show captions
+}
+
+function toggleSplitCaptions() {
+    const isChecked = document.getElementById('splitCaptionsToggle').checked;
+    const downloadBtn = document.getElementById('downloadSplitCaptionsBtn');
+    
+    if (isChecked) {
+        generateSplitCaptions();
+        // Only show download button if not in shared mode
+        if (!isSharedMode()) {
+            downloadBtn.style.display = 'inline-block';
+        }
+    } else {
+        downloadBtn.style.display = 'none';
+    }
+}
+
+function generateSplitCaptions() {
+    splitCaptions = [];
+    
+    currentData.forEach((segment, index) => {
+        const text = segment.text || '';
+        const startTime = parseFloat(segment.start_seconds || 0);
+        const endTime = parseFloat(segment.end_seconds || 0);
+        const duration = endTime - startTime;
+        
+        if (!text || duration <= 0) return;
+        
+        // Split text into 20-character chunks
+        const chunks = [];
+        let currentChunk = '';
+        
+        // Split by words to avoid breaking words
+        const words = text.split(' ');
+        for (const word of words) {
+            if ((currentChunk + ' ' + word).length <= 20) {
+                currentChunk = currentChunk ? currentChunk + ' ' + word : word;
+            } else {
+                if (currentChunk) {
+                    chunks.push(currentChunk);
+                }
+                // If single word is longer than 20 chars, split it
+                if (word.length > 20) {
+                    for (let i = 0; i < word.length; i += 20) {
+                        chunks.push(word.substring(i, i + 20));
+                    }
+                    currentChunk = '';
+                } else {
+                    currentChunk = word;
+                }
+            }
+        }
+        if (currentChunk) {
+            chunks.push(currentChunk);
+        }
+        
+        // If no chunks (empty text), skip
+        if (chunks.length === 0) return;
+        
+        // Distribute duration equally across chunks
+        const chunkDuration = duration / chunks.length;
+        
+        chunks.forEach((chunkText, chunkIndex) => {
+            const chunkStart = startTime + (chunkIndex * chunkDuration);
+            const chunkEnd = chunkIndex === chunks.length - 1 ? endTime : startTime + ((chunkIndex + 1) * chunkDuration);
+            
+            splitCaptions.push({
+                text: chunkText,
+                start_seconds: chunkStart,
+                end_seconds: chunkEnd,
+                originalIndex: index,
+                chunkIndex: chunkIndex
+            });
+        });
+    });
+}
+
+function findSegmentAtTime(time) {
+    const splitToggle = document.getElementById('splitCaptionsToggle');
+    const dataSource = splitToggle && splitToggle.checked ? splitCaptions : currentData;
+    
+    for (let i = 0; i < dataSource.length; i++) {
+        const segment = dataSource[i];
+        const start = parseFloat(segment.start_seconds || 0);
+        const end = parseFloat(segment.end_seconds || 0);
+        
+        // Include the end time for the last segment to handle edge cases
+        const isLastSegment = i === dataSource.length - 1;
+        if (time >= start && (isLastSegment ? time <= end : time < end)) {
+            return { ...segment, index: i };
+        }
+    }
+    return null;
+}
+
+function toggleVideoCommentsMode() {
+    const isChecked = document.getElementById('videoCommentsMode').checked;
+    const captionCheckTable = document.getElementById('captionCheckTable');
+    const videoCommentsPanel = document.getElementById('videoCommentsPanel');
+    const exportBtn = document.getElementById('exportCommentsBtn');
+    const modeLabelLeft = document.getElementById('modeLabelLeft');
+    const modeLabelRight = document.getElementById('modeLabelRight');
+    
+    if (isChecked) {
+        // Video Comments Mode: Show comments panel on right
+        captionCheckTable.style.display = 'none';
+        videoCommentsPanel.style.display = 'block';
+        // Only show export button if not in shared mode
+        if (exportBtn && !isSharedMode()) {
+            exportBtn.style.display = 'inline-block';
+        }
+        // Update labels
+        if (modeLabelLeft) modeLabelLeft.classList.remove('active');
+        if (modeLabelRight) modeLabelRight.classList.add('active');
+        loadGeneralComments();
+    } else {
+        // Default Mode: Show caption check on right
+        captionCheckTable.style.display = 'block';
+        videoCommentsPanel.style.display = 'none';
+        if (exportBtn) exportBtn.style.display = 'none';
+        // Update labels
+        if (modeLabelLeft) modeLabelLeft.classList.add('active');
+        if (modeLabelRight) modeLabelRight.classList.remove('active');
+    }
+}
+
+function renderCaptionCheckTable() {
+    const thead = document.getElementById('captionCheckHead');
+    const tbody = document.getElementById('captionCheckBody');
+    
+    if (currentData.length === 0) return;
+    
+    // Render header with timestamps
+    thead.innerHTML = `
+        <tr>
+            <th style="width: 100px;">Start</th>
+            <th style="width: 100px;">End</th>
+            <th>Text</th>
+        </tr>
+    `;
+    
+    // Helper to format seconds to readable time
+    const formatTime = (seconds) => {
+        const sec = parseFloat(seconds || 0);
+        const mins = Math.floor(sec / 60);
+        const secs = (sec % 60).toFixed(2);
+        // Don't show "0:" prefix for times under 1 minute
+        if (mins === 0) {
+            return secs;
+        }
+        return `${mins}:${secs.padStart(5, '0')}`;
+    };
+    
+    // Render body
+    tbody.innerHTML = currentData.map((row, index) => {
+        const startTime = formatTime(row.start_seconds);
+        const endTime = formatTime(row.end_seconds);
+        
+        return `
+            <tr data-index="${index}" onclick="jumpToCaptionSegment(${index})">
+                <td style="text-align: center; font-family: monospace; color: #6b7280;">${startTime}</td>
+                <td style="text-align: center; font-family: monospace; color: #6b7280;">${endTime}</td>
+                <td class="text-cell">
+                    <input type="text" class="reason-input" value="${row.text || ''}" 
+                        onchange="updateTextAndRefresh(${index}, this.value)"
+                        onclick="event.stopPropagation()">
+                </td>
+            </tr>
+        `;
+    }).join('');
+}
+
+function updateTextAndRefresh(index, value) {
+    // Update the data
+    currentData[index].text = value;
+    
+    // Regenerate split captions if toggle is enabled
+    const splitToggle = document.getElementById('splitCaptionsToggle');
+    if (splitToggle && splitToggle.checked) {
+        generateSplitCaptions();
+    }
+    
+    // Also re-render the main table so changes are reflected
+    const tbody = document.getElementById('tableBody');
+    if (tbody) {
+        renderTableBody();
+    }
+}
+
+function jumpToCaptionSegment(index) {
+    if (!fullVideoElement) return;
+    
+    const row = currentData[index];
+    const startTime = parseFloat(row.start_seconds || 0);
+    
+    fullVideoElement.currentTime = startTime;
+    fullVideoElement.play();
+}
+
+function updateCaptionCheckTableHighlight() {
+    // Always update if caption check table is visible
+    const captionCheckTable = document.getElementById('captionCheckTable');
+    if (!captionCheckTable || captionCheckTable.style.display === 'none') return;
+    
+    if (!fullVideoElement) return;
+    
+    const currentTime = fullVideoElement.currentTime;
+    const currentSegment = findSegmentAtTime(currentTime);
+    
+    if (currentSegment) {
+        const rows = document.querySelectorAll('#captionCheckBody tr');
+        rows.forEach(row => {
+            const rowIndex = parseInt(row.getAttribute('data-index'));
+            // When split captions are enabled, use originalIndex to match with original data
+            // When not enabled, use index directly
+            const segmentIndex = currentSegment.originalIndex !== undefined ? currentSegment.originalIndex : currentSegment.index;
+            
+            if (rowIndex === segmentIndex) {
+                row.classList.add('current-segment');
+                // Auto-scroll to current segment
+                row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            } else {
+                row.classList.remove('current-segment');
+            }
+        });
+    } else {
+        // Clear highlight if no segment
+        const rows = document.querySelectorAll('#captionCheckBody tr');
+        rows.forEach(row => row.classList.remove('current-segment'));
+    }
+}
+
+// findSegmentAtTime is defined above with split caption support
+
+function addCommentAtTimestamp() {
+    if (!fullVideoElement) return;
+    
+    const comment = document.getElementById('commentInput').value.trim();
+    if (!comment) {
+        showNotification('Please enter a comment', 'error');
+        return;
+    }
+    
+    const currentTime = fullVideoElement.currentTime;
+    const segment = findSegmentAtTime(currentTime);
+    
+    if (segment) {
+        // Update the text field for this segment
+        currentData[segment.index].text = comment;
+        
+        // Re-render table
+        renderTableBody();
+        
+        // Highlight the updated row (without scrolling)
+        highlightRow(segment.index, false);
+        
+        // Clear input
+        document.getElementById('commentInput').value = '';
+        
+        showNotification(`Comment added to segment ${segment.segment}`, 'success');
+    } else {
+        showNotification('No segment found at current timestamp', 'error');
+    }
+}
+
+function highlightRow(index, scroll = true) {
+    // Remove previous selection
+    document.querySelectorAll('tr.selected-row').forEach(row => {
+        row.classList.remove('selected-row');
+    });
+    
+    selectedRowIndex = index;
+    
+    // Add selection to current row
+    const rows = document.querySelectorAll('tbody tr');
+    rows.forEach((row, i) => {
+        const rowIndex = parseInt(row.getAttribute('data-index'));
+        if (rowIndex === index) {
+            row.classList.add('selected-row');
+            if (scroll) {
+                row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            }
+        }
+    });
+}
+
+function jumpToSelectedSegment() {
+    if (selectedRowIndex === null || !fullVideoElement) {
+        showNotification('No row selected. Click on a row to select it.', 'error');
+        return;
+    }
+    
+    const row = currentData[selectedRowIndex];
+    const startTime = parseFloat(row.start_seconds || 0);
+    
+    fullVideoElement.currentTime = startTime;
+    fullVideoElement.play();
+}
+
+function scrollToCurrentSegment() {
+    if (!fullVideoElement) return;
+    
+    const currentTime = fullVideoElement.currentTime;
+    const segment = findSegmentAtTime(currentTime);
+    
+    if (segment) {
+        // Highlight and scroll to the current segment
+        highlightRow(segment.index, true);
+        showNotification(`Scrolled to segment ${segment.segment || segment.index + 1}`, 'success');
+    } else {
+        showNotification('No segment at current timestamp', 'error');
+    }
+}
+
+// General Video Comments
+function loadGeneralComments() {
+    const commentsList = document.getElementById('generalCommentsList');
+    
+    if (!commentsList) return;
+    
+    if (videoComments.length === 0) {
+        commentsList.innerHTML = '<p class="no-comments">No comments yet. Add one below!</p>';
+    } else {
+        commentsList.innerHTML = videoComments.map(comment => {
+            const timestamp = comment.timestamp ? 
+                `<span class="comment-timestamp">@ ${formatTimestamp(comment.timestamp)}</span>` : '';
+            const date = new Date(comment.createdAt).toLocaleString();
+            
+            return `
+                <div class="general-comment-item" data-comment-id="${comment.id}">
+                    <div class="comment-header">
+                        <span class="comment-author">${comment.author}</span>
+                        ${timestamp}
+                        <span class="comment-date">${date}</span>
+                    </div>
+                    <div class="comment-text">${escapeHtml(comment.text)}</div>
+                    <div class="comment-actions">
+                        ${comment.timestamp ? `<button class="btn-sm btn-secondary" onclick="jumpToCommentTimestamp('${comment.id}')">Jump to Time</button>` : ''}
+                        <button class="btn-sm btn-secondary" onclick="editGeneralComment('${comment.id}')">Edit</button>
+                        <button class="btn-sm btn-danger" onclick="deleteGeneralComment('${comment.id}')">Delete</button>
+                    </div>
+                </div>
+            `;
+        }).join('');
+    }
+}
+
+function formatTimestamp(seconds) {
+    const mins = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    const ms = Math.floor((seconds % 1) * 1000);
+    return `${mins}:${String(secs).padStart(2, '0')}.${String(ms).padStart(3, '0')}`;
+}
+
+function escapeHtml(text) {
+    const div = document.createElement('div');
+    div.textContent = text;
+    return div.innerHTML;
+}
+
+async function addGeneralComment() {
+    const textarea = document.getElementById('generalCommentInput');
+    const text = textarea.value.trim();
+    
+    if (!text) {
+        showNotification('Please enter a comment', 'error');
+        return;
+    }
+    
+    // Always add timestamp if video is available and playing
+    let timestamp = null;
+    if (fullVideoElement && currentVideoFile) {
+        timestamp = fullVideoElement.currentTime || 0;
+    }
+    
+    try {
+        const response = await fetch(`/api/files/${currentFileId}/comments`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text, timestamp })
+        });
+        
+        if (response.ok) {
+            const result = await response.json();
+            videoComments.push(result.comment);
+            loadGeneralComments();
+            textarea.value = '';
+            const timestampMsg = timestamp > 0 ? ` at ${formatTimestamp(timestamp)}` : '';
+            showNotification(`Comment added${timestampMsg}`, 'success');
+        } else {
+            showNotification('Failed to add comment', 'error');
+        }
+    } catch (error) {
+        console.error('Error adding comment:', error);
+        showNotification('Error adding comment', 'error');
+    }
+}
+
+async function editGeneralComment(commentId) {
+    const comment = videoComments.find(c => c.id === commentId);
+    if (!comment) return;
+    
+    const newText = prompt('Edit comment:', comment.text);
+    if (!newText || newText === comment.text) return;
+    
+    try {
+        const response = await fetch(`/api/files/${currentFileId}/comments/${commentId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text: newText })
+        });
+        
+        if (response.ok) {
+            const result = await response.json();
+            const index = videoComments.findIndex(c => c.id === commentId);
+            if (index !== -1) {
+                videoComments[index] = result.comment;
+            }
+            loadGeneralComments();
+            showNotification('Comment updated', 'success');
+        } else {
+            showNotification('Failed to update comment', 'error');
+        }
+    } catch (error) {
+        console.error('Error updating comment:', error);
+        showNotification('Error updating comment', 'error');
+    }
+}
+
+async function deleteGeneralComment(commentId) {
+    if (!confirm('Delete this comment?')) return;
+    
+    try {
+        const response = await fetch(`/api/files/${currentFileId}/comments/${commentId}`, {
+            method: 'DELETE'
+        });
+        
+        if (response.ok) {
+            videoComments = videoComments.filter(c => c.id !== commentId);
+            loadGeneralComments();
+            showNotification('Comment deleted', 'success');
+        } else {
+            showNotification('Failed to delete comment', 'error');
+        }
+    } catch (error) {
+        console.error('Error deleting comment:', error);
+        showNotification('Error deleting comment', 'error');
+    }
+}
+
+function jumpToCommentTimestamp(commentId) {
+    const comment = videoComments.find(c => c.id === commentId);
+    if (!comment || !comment.timestamp || !fullVideoElement) return;
+    
+    // Switch to full video mode if not already
+    if (videoMode !== 'full') {
+        toggleVideoMode();
+    }
+    
+    fullVideoElement.currentTime = comment.timestamp;
+    fullVideoElement.play();
+    showNotification(`Jumped to ${formatTimestamp(comment.timestamp)}`, 'success');
+}
+
+async function exportComments() {
+    if (!currentFileId || videoComments.length === 0) {
+        showNotification('No comments to export', 'error');
+        return;
+    }
+    
+    try {
+        // Format comments as text
+        let textContent = `Video Review Comments\n`;
+        textContent += `File: ${document.getElementById('currentFileName').textContent}\n`;
+        textContent += `Date: ${new Date().toLocaleString()}\n`;
+        textContent += `Total Comments: ${videoComments.length}\n`;
+        textContent += `\n${'='.repeat(80)}\n\n`;
+        
+        videoComments.forEach((comment, index) => {
+            textContent += `Comment ${index + 1}\n`;
+            textContent += `Author: ${comment.author}\n`;
+            textContent += `Date: ${new Date(comment.createdAt).toLocaleString()}\n`;
+            if (comment.timestamp) {
+                textContent += `Video Timestamp: ${formatTimestamp(comment.timestamp)}\n`;
+            }
+            textContent += `\n${comment.text}\n`;
+            textContent += `\n${'-'.repeat(80)}\n\n`;
+        });
+        
+        // Create blob and download
+        const blob = new Blob([textContent], { type: 'text/plain;charset=utf-8' });
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        const filename = document.getElementById('currentFileName').textContent.replace(/\.csv$/i, '') + '_comments.txt';
+        a.download = filename;
+        a.click();
+        window.URL.revokeObjectURL(url);
+        
+        showNotification('Comments exported successfully', 'success');
+    } catch (error) {
+        console.error('Export error:', error);
+        showNotification('Error exporting comments', 'error');
+    }
+}
+
+async function closeEditor() {
+    console.log('Closing editor...');
+    
+    // Stop any playing video
+    stopVideoSegment();
+    if (fullVideoElement) {
+        fullVideoElement.pause();
+        fullVideoElement.src = '';
+    }
+    if (hoverVideoElement) {
+        hoverVideoElement.pause();
+        hoverVideoElement.src = '';
+    }
+    
+    // Hide all editor sections
+    const editorSection = document.getElementById('editorSection');
+    const columnPanel = document.getElementById('columnPanel');
+    const hoverVideoPlayer = document.getElementById('hoverVideoPlayer');
+    const fullVideoSection = document.getElementById('fullVideoSection');
+    const generalCommentsSection = document.getElementById('generalCommentsSection');
+    const videoModeBtn = document.getElementById('videoModeBtn');
+    
+    if (editorSection) {
+        editorSection.style.display = 'none';
+        editorSection.classList.remove('editor-modal-active');
+        console.log('Editor section hidden');
+    }
+    if (columnPanel) columnPanel.style.display = 'none';
+    if (hoverVideoPlayer) hoverVideoPlayer.style.display = 'none';
+    if (fullVideoSection) fullVideoSection.style.display = 'none';
+    if (videoModeBtn) videoModeBtn.style.display = 'none';
+    
+    // Re-enable background scrolling
+    document.body.style.overflow = '';
+    
+    // Reset video modes
+    document.getElementById('videoCommentsMode').checked = false;
+    const exportCommentsBtn = document.getElementById('exportCommentsBtn');
+    if (exportCommentsBtn) exportCommentsBtn.style.display = 'none';
+    
+    // Reset panels to default
+    const captionCheckTable = document.getElementById('captionCheckTable');
+    const videoCommentsPanel = document.getElementById('videoCommentsPanel');
+    if (captionCheckTable) captionCheckTable.style.display = 'block';
+    if (videoCommentsPanel) videoCommentsPanel.style.display = 'none';
+    
+    // Reset state
+    currentFileId = null;
+    currentData = [];
+    isCompleted = false;
+    currentVideoFile = null;
+    selectedRowIndex = null;
+    videoMode = 'hover';
+    videoComments = [];
+    
+    await loadFiles(); // Refresh file list when closing editor
+    
+    console.log('Editor closed');
+}
+
+// Bulk Selection and Delete
+function toggleFileSelection(fileId) {
+    if (selectedFiles.has(fileId)) {
+        selectedFiles.delete(fileId);
+    } else {
+        selectedFiles.add(fileId);
+    }
+    updateBulkDeleteUI();
+}
+
+function toggleSelectAll(e) {
+    const isChecked = e.target.checked;
+    const allFileCards = document.querySelectorAll('.file-card');
+    
+    if (isChecked) {
+        // Select all visible files
+        allFileCards.forEach(card => {
+            const checkbox = card.querySelector('.file-select-checkbox');
+            if (checkbox) {
+                const fileId = checkbox.dataset.fileId;
+                selectedFiles.add(fileId);
+                checkbox.checked = true;
+                card.classList.add('selected');
+            }
+        });
+    } else {
+        // Deselect all
+        selectedFiles.clear();
+        allFileCards.forEach(card => {
+            const checkbox = card.querySelector('.file-select-checkbox');
+            if (checkbox) {
+                checkbox.checked = false;
+                card.classList.remove('selected');
+            }
+        });
+    }
+    updateBulkDeleteUI();
+}
+
+function updateBulkDeleteUI() {
+    const deleteBtn = document.getElementById('deleteSelectedBtn');
+    const cancelBtn = document.getElementById('cancelSelectionBtn');
+    const selectedCount = document.getElementById('selectedCount');
+    const selectedCountDisplay = document.getElementById('selectedCountDisplay');
+    const selectAllCheckbox = document.getElementById('selectAllFiles');
+    
+    if (!deleteBtn || !cancelBtn || !selectedCount) return;
+    
+    if (selectedFiles.size > 0) {
+        deleteBtn.style.display = 'inline-block';
+        cancelBtn.style.display = 'inline-block';
+        selectedCount.textContent = selectedFiles.size;
+        if (selectedCountDisplay) selectedCountDisplay.style.display = 'inline-block';
+    } else {
+        deleteBtn.style.display = 'none';
+        cancelBtn.style.display = 'none';
+        if (selectedCountDisplay) selectedCountDisplay.style.display = 'none';
+        if (selectAllCheckbox) selectAllCheckbox.checked = false;
+    }
+    
+    // Update checkboxes in cards
+    document.querySelectorAll('.file-select-checkbox').forEach(checkbox => {
+        const fileId = checkbox.dataset.fileId;
+        checkbox.checked = selectedFiles.has(fileId);
+        const card = checkbox.closest('.file-card');
+        if (card) {
+            if (selectedFiles.has(fileId)) {
+                card.classList.add('selected');
+            } else {
+                card.classList.remove('selected');
+            }
+        }
+    });
+}
+
+function cancelSelection() {
+    selectedFiles.clear();
+    updateBulkDeleteUI();
+}
+
+async function deleteSelectedFiles() {
+    if (selectedFiles.size === 0) return;
+    
+    const count = selectedFiles.size;
+    if (!confirm(`Delete ${count} selected file(s)? This cannot be undone!`)) return;
+    
+    const deleteBtn = document.getElementById('deleteSelectedBtn');
+    deleteBtn.textContent = 'Deleting...';
+    deleteBtn.disabled = true;
+    
+    let deleted = 0;
+    let failed = 0;
+    
+    for (const fileId of selectedFiles) {
+        try {
+            const response = await fetch(`/api/files/${fileId}`, {
+                method: 'DELETE'
+            });
+            
+            if (response.ok) {
+                deleted++;
+            } else {
+                failed++;
+            }
+        } catch (error) {
+            console.error('Error deleting file:', fileId, error);
+            failed++;
+        }
+    }
+    
+    selectedFiles.clear();
+    showNotification(`Deleted ${deleted} file(s). Failed: ${failed}`, deleted > 0 ? 'success' : 'error');
+    
+    deleteBtn.textContent = 'Delete Selected';
+    deleteBtn.disabled = false;
+    
+    loadFiles();
+}
+
+// Notification
+function showNotification(message, type = 'success') {
+    const notification = document.getElementById('notification');
+    notification.textContent = message;
+    notification.className = `notification ${type} show`;
+
+    setTimeout(() => {
+        notification.classList.remove('show');
+    }, 3000);
+}
+

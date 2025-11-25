@@ -1,0 +1,20 @@
+# Copy this file to .env and update with your values
+# DO NOT commit .env to version control!
+
+# Server Configuration
+PORT=3000
+NODE_ENV=production
+
+# Session Secret (Generate with: node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")
+# MUST CHANGE IN PRODUCTION!
+SESSION_SECRET=your-super-secret-session-key-change-this-in-production
+
+# Admin Credentials
+# MUST CHANGE IN PRODUCTION!
+ADMIN_USERNAME=admin
+ADMIN_PASSWORD=Pranulit1009.
+
+# Optional: FFmpeg path (if not in system PATH)
+# FFMPEG_PATH=/usr/bin/ffmpeg
+# FFMPEG_PATH=C:\ffmpeg\bin\ffmpeg.exe
+
