@@ -249,6 +249,11 @@ const uploadLimiter = rateLimit({
   message: 'Too many uploads from this IP, please try again later.'
 });
 
+// Trust proxy for Cloudflare (must be before session middleware)
+if (NODE_ENV === 'production') {
+  app.set('trust proxy', 1);
+}
+
 // Middleware
 app.use(limiter);
 app.use(express.json({ limit: '10mb' }));
@@ -264,7 +269,7 @@ const sessionConfig = {
     maxAge: 24 * 60 * 60 * 1000, // 24 hours
     httpOnly: true,
     secure: NODE_ENV === 'production', // HTTPS only in production
-    sameSite: 'strict'
+    sameSite: NODE_ENV === 'production' ? 'none' : 'strict' // 'none' needed for Cloudflare proxy
   }
 };
 
