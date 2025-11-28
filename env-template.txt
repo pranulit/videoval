@@ -12,7 +12,7 @@ SESSION_SECRET=your-super-secret-session-key-change-this-in-production
 # Admin Credentials
 # MUST CHANGE IN PRODUCTION!
 ADMIN_USERNAME=admin
-ADMIN_PASSWORD=Pranulit1009.
+ADMIN_PASSWORD=your-secure-password-here
 
 # Optional: FFmpeg path (if not in system PATH)
 # FFMPEG_PATH=/usr/bin/ffmpeg

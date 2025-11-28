@@ -13,21 +13,22 @@ const rateLimit = require('express-rate-limit');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const NODE_ENV = process.env.NODE_ENV || 'development';
+const CAPTION_EXTENSIONS = ['.csv', '.srt'];
+const VIDEO_EXTENSIONS = ['.mp4', '.webm', '.mov', '.avi'];
 
-// Admin credentials from environment variables
+// Admin credentials from environment variables (REQUIRED)
 const ADMIN_USERNAME = process.env.ADMIN_USERNAME || 'admin';
-const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || 'admin123';
+const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD;
+
+if (!ADMIN_PASSWORD) {
+  throw new Error('ADMIN_PASSWORD environment variable is required');
+}
 const ADMIN_PASSWORD_HASH = bcrypt.hashSync(ADMIN_PASSWORD, 10);
 const SESSION_SECRET = process.env.SESSION_SECRET || 'your-secret-key-change-in-production';
 
-// Validate production configuration
-if (NODE_ENV === 'production') {
-  if (!process.env.SESSION_SECRET || process.env.SESSION_SECRET === 'your-secret-key-change-in-production') {
-    console.error('⚠️  WARNING: SESSION_SECRET not set or using default value!');
-  }
-  if (!process.env.ADMIN_PASSWORD || process.env.ADMIN_PASSWORD === 'admin123') {
-    console.error('⚠️  WARNING: ADMIN_PASSWORD not set or using default value!');
-  }
+// Validate configuration
+if (!process.env.SESSION_SECRET || process.env.SESSION_SECRET === 'your-secret-key-change-in-production') {
+  console.error('⚠️  WARNING: SESSION_SECRET not set or using default template value!');
 }
 
 // Configure FFmpeg path if provided
@@ -47,7 +48,107 @@ function extractGroupKey(filename) {
 
 // Helper function to normalize filename for matching
 function normalizeFilename(filename) {
-  return filename.replace(/\.(csv|mp4|webm|mov|avi)$/i, '').replace(/_split$/i, '');
+  return filename.replace(/\.(csv|srt|mp4|webm|mov|avi)$/i, '').replace(/_split$/i, '');
+}
+
+function isCaptionFile(filename) {
+  return CAPTION_EXTENSIONS.includes(path.extname(filename).toLowerCase());
+}
+
+function isVideoFile(filename) {
+  return VIDEO_EXTENSIONS.includes(path.extname(filename).toLowerCase());
+}
+
+function parseTimestampToSeconds(timestamp) {
+  const sanitized = timestamp.replace(',', '.');
+  const [hours, minutes, secondsPart] = sanitized.split(':');
+  const seconds = parseFloat(secondsPart);
+  return (parseInt(hours, 10) * 3600) + (parseInt(minutes, 10) * 60) + seconds;
+}
+
+function secondsToTimestamp(seconds) {
+  const totalMillis = Math.round(seconds * 1000);
+  const hrs = Math.floor(totalMillis / 3600000);
+  const mins = Math.floor((totalMillis % 3600000) / 60000);
+  const secs = Math.floor((totalMillis % 60000) / 1000);
+  const millis = totalMillis % 1000;
+  const pad = (value, size = 2) => String(value).padStart(size, '0');
+  return `${pad(hrs)}:${pad(mins)}:${pad(secs)}.${pad(millis, 3)}`;
+}
+
+function parseSrtContent(content) {
+  const normalized = content.replace(/\r/g, '').trim();
+  if (!normalized) {
+    return [];
+  }
+
+  const blocks = normalized.split(/\n\n+/);
+  const records = [];
+
+  blocks.forEach((block) => {
+    const lines = block.split('\n').map(line => line.trim()).filter(Boolean);
+    if (lines.length < 2) {
+      return;
+    }
+
+    let lineIndex = 0;
+    let segmentLabel = lines[lineIndex];
+    if (/^\d+$/.test(segmentLabel)) {
+      lineIndex += 1;
+    } else {
+      segmentLabel = (records.length + 1).toString();
+    }
+
+    if (lineIndex >= lines.length) {
+      return;
+    }
+
+    const timingLine = lines[lineIndex];
+    lineIndex += 1;
+    const timingMatch = timingLine.match(/(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,\.]\d{3})/);
+    if (!timingMatch) {
+      return;
+    }
+
+    const startSeconds = parseTimestampToSeconds(timingMatch[1]);
+    const endSeconds = parseTimestampToSeconds(timingMatch[2]);
+    const duration = Math.max(0, endSeconds - startSeconds);
+    let text = lines.slice(lineIndex).join(' ').trim();
+
+    // Strip any existing <font> tags or other simple HTML formatting
+    text = text.replace(/<\/?font[^>]*>/gi, '');
+
+    records.push({
+      segment: segmentLabel,
+      start_seconds: startSeconds.toFixed(3),
+      end_seconds: endSeconds.toFixed(3),
+      duration: duration.toFixed(3),
+      start_time: secondsToTimestamp(startSeconds),
+      end_time: secondsToTimestamp(endSeconds),
+      text
+    });
+  });
+
+  return records;
+}
+
+function parseCaptionFile(filePath, originalName) {
+  const fileContent = fs.readFileSync(filePath, 'utf-8');
+  const ext = path.extname(originalName).toLowerCase();
+
+  if (ext === '.srt') {
+    const records = parseSrtContent(fileContent);
+    if (!records.length) {
+      throw new Error('SRT file is empty or invalid');
+    }
+    return records;
+  }
+
+  return parse(fileContent, {
+    columns: true,
+    skip_empty_lines: true,
+    trim: true
+  });
 }
 
 // Helper function to generate video thumbnail
@@ -89,10 +190,10 @@ const csvStorage = multer.diskStorage({
 const uploadCSV = multer({ 
   storage: csvStorage, 
   fileFilter: (req, file, cb) => {
-    if (path.extname(file.originalname).toLowerCase() === '.csv') {
+    if (isCaptionFile(file.originalname)) {
       cb(null, true);
     } else {
-      cb(new Error('Only CSV files are allowed'));
+      cb(new Error('Only CSV or SRT files are allowed'));
     }
   }
 });
@@ -108,8 +209,7 @@ const videoStorage = multer.diskStorage({
 const uploadVideo = multer({ 
   storage: videoStorage,
   fileFilter: (req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase();
-    if (['.mp4', '.webm', '.mov', '.avi'].includes(ext)) {
+    if (isVideoFile(file.originalname)) {
       cb(null, true);
     } else {
       cb(new Error('Only video files are allowed (.mp4, .webm, .mov, .avi)'));
@@ -128,11 +228,10 @@ const bulkStorage = multer.diskStorage({
 const uploadBulk = multer({ 
   storage: bulkStorage,
   fileFilter: (req, file, cb) => {
-    const ext = path.extname(file.originalname).toLowerCase();
-    if (['.csv', '.mp4', '.webm', '.mov', '.avi'].includes(ext)) {
+    if (isCaptionFile(file.originalname) || isVideoFile(file.originalname)) {
       cb(null, true);
     } else {
-      cb(new Error('Only CSV and video files are allowed'));
+      cb(new Error('Only CSV/SRT caption files and video files are allowed'));
     }
   }
 });
@@ -208,12 +307,7 @@ app.get('/api/auth-status', (req, res) => {
 // Upload CSV file (admin only)
 app.post('/api/upload', requireAdmin, uploadLimiter, uploadCSV.single('file'), (req, res) => {
   try {
-    const fileContent = fs.readFileSync(req.file.path, 'utf-8');
-    const records = parse(fileContent, {
-      columns: true,
-      skip_empty_lines: true,
-      trim: true
-    });
+    const records = parseCaptionFile(req.file.path, req.file.originalname);
     
     const fileId = Date.now().toString();
     const dataFile = {
@@ -239,7 +333,12 @@ app.post('/api/upload', requireAdmin, uploadLimiter, uploadCSV.single('file'), (
     res.json({ success: true, fileId, fileName: req.file.originalname });
   } catch (error) {
     console.error('Upload error:', error);
-    res.status(500).json({ error: 'Failed to process file' });
+    if (req.file && req.file.path && fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
+    const message = error.message || 'Failed to process file';
+    const statusCode = /invalid|empty/i.test(message) ? 400 : 500;
+    res.status(statusCode).json({ error: message });
   }
 });
 
@@ -258,42 +357,34 @@ app.post('/api/upload-bulk', requireAdmin, uploadLimiter, uploadBulk.array('file
     
     console.log('Bulk upload received:', uploadedFiles.length, 'files');
     
-    // Separate CSV and video files
-    const csvFiles = uploadedFiles.filter(f => f.originalname.toLowerCase().endsWith('.csv'));
-    const videoFiles = uploadedFiles.filter(f => {
-      const ext = path.extname(f.originalname).toLowerCase();
-      return ['.mp4', '.webm', '.mov', '.avi'].includes(ext);
-    });
+    // Separate caption and video files
+    const captionFiles = uploadedFiles.filter(f => isCaptionFile(f.originalname));
+    const videoFiles = uploadedFiles.filter(f => isVideoFile(f.originalname));
     
-    console.log('CSVs:', csvFiles.length, 'Videos:', videoFiles.length);
+    console.log('Caption files:', captionFiles.length, 'Videos:', videoFiles.length);
     
     const results = {
       created: [],
       matched: [],
-      unmatched: { csvs: [], videos: [] },
+      unmatched: { captions: [], videos: [] },
       errors: []
     };
     
     const folderId = req.body.folderId || null;
     
-    // Process CSV files and try to match with videos
-    for (const csvFile of csvFiles) {
+    // Process caption files and try to match with videos
+    for (const captionFile of captionFiles) {
       try {
-        const csvContent = fs.readFileSync(csvFile.path, 'utf-8');
-        const records = parse(csvContent, {
-          columns: true,
-          skip_empty_lines: true,
-          trim: true
-        });
+        const records = parseCaptionFile(captionFile.path, captionFile.originalname);
         
-        const csvNormalized = normalizeFilename(csvFile.originalname);
-        const groupKey = extractGroupKey(csvFile.originalname);
+        const captionNormalized = normalizeFilename(captionFile.originalname);
+        const groupKey = extractGroupKey(captionFile.originalname);
         
         // Try to find matching video
         let matchedVideo = null;
         const videoMatch = videoFiles.find(vf => {
           const videoNormalized = normalizeFilename(vf.originalname);
-          return csvNormalized === videoNormalized;
+          return captionNormalized === videoNormalized;
         });
         
         let thumbnailFile = null;
@@ -301,7 +392,7 @@ app.post('/api/upload-bulk', requireAdmin, uploadLimiter, uploadBulk.array('file
         if (videoMatch) {
           matchedVideo = videoMatch.filename;
           results.matched.push({
-            csv: csvFile.originalname,
+            caption: captionFile.originalname,
             video: videoMatch.originalname
           });
           
@@ -322,14 +413,14 @@ app.post('/api/upload-bulk', requireAdmin, uploadLimiter, uploadBulk.array('file
           const index = videoFiles.indexOf(videoMatch);
           if (index > -1) videoFiles.splice(index, 1);
         } else {
-          results.unmatched.csvs.push(csvFile.originalname);
+          results.unmatched.captions.push(captionFile.originalname);
         }
         
         // Create file entry
         const fileId = Date.now().toString() + '-' + Math.random().toString(36).substr(2, 9);
         const dataFile = {
           id: fileId,
-          originalName: csvFile.originalname,
+          originalName: captionFile.originalname,
           uploadDate: new Date().toISOString(),
           completed: false,
           videoFile: matchedVideo,
@@ -347,23 +438,23 @@ app.post('/api/upload-bulk', requireAdmin, uploadLimiter, uploadBulk.array('file
         
         results.created.push({
           id: fileId,
-          name: csvFile.originalname,
+          name: captionFile.originalname,
           hasVideo: !!matchedVideo,
           groupKey: groupKey
         });
         
         // Clean up uploaded CSV
-        fs.unlinkSync(csvFile.path);
+        fs.unlinkSync(captionFile.path);
         
       } catch (error) {
-        console.error('Error processing CSV:', csvFile.originalname, error);
+        console.error('Error processing caption file:', captionFile.originalname, error);
         results.errors.push({
-          file: csvFile.originalname,
+          file: captionFile.originalname,
           error: error.message
         });
         // Clean up on error
-        if (fs.existsSync(csvFile.path)) {
-          fs.unlinkSync(csvFile.path);
+        if (fs.existsSync(captionFile.path)) {
+          fs.unlinkSync(captionFile.path);
         }
       }
     }
