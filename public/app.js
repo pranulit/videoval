@@ -163,6 +163,9 @@ function setupEventListeners() {
     const exportCommentsBtn = document.getElementById('exportCommentsBtn');
     if (exportCommentsBtn) exportCommentsBtn.addEventListener('click', exportComments);
     
+    const toggleEditorControlsBtn = document.getElementById('toggleEditorControlsBtn');
+    if (toggleEditorControlsBtn) toggleEditorControlsBtn.addEventListener('click', toggleEditorControls);
+    
     document.getElementById('newFolderBtn').addEventListener('click', openCreateFolderModal);
     document.getElementById('createFolderForm').addEventListener('submit', handleCreateFolder);
     document.getElementById('addGeneralCommentBtn').addEventListener('click', addGeneralComment);
@@ -200,6 +203,172 @@ function setupEventListeners() {
         srtToggle.addEventListener('change', handleSrtToggleChange);
     }
     updateCaptionModeUI();
+    
+    // Custom video controls
+    const playPauseBtn = document.getElementById('playPauseBtn');
+    const skipBackBtn = document.getElementById('skipBackBtn');
+    const skipForwardBtn = document.getElementById('skipForwardBtn');
+    const opacitySlider = document.getElementById('buttonOpacitySlider');
+    const videoProgressBar = document.getElementById('videoProgressBar');
+    
+    if (playPauseBtn) playPauseBtn.addEventListener('click', togglePlayPause);
+    if (skipBackBtn) skipBackBtn.addEventListener('click', () => skipVideo(-15));
+    if (skipForwardBtn) skipForwardBtn.addEventListener('click', () => skipVideo(15));
+    if (opacitySlider) opacitySlider.addEventListener('input', updateButtonOpacity);
+    if (videoProgressBar) videoProgressBar.addEventListener('click', seekVideo);
+    
+    const saveMobileCommentBtn = document.getElementById('saveMobileCommentBtn');
+    if (saveMobileCommentBtn) saveMobileCommentBtn.addEventListener('click', saveMobileComment);
+    
+    // Update play/pause icon when video state changes
+    if (fullVideoElement) {
+        fullVideoElement.addEventListener('play', updatePlayPauseIcon);
+        fullVideoElement.addEventListener('pause', updatePlayPauseIcon);
+        fullVideoElement.addEventListener('timeupdate', updateVideoProgress);
+        fullVideoElement.addEventListener('timeupdate', updateMobileCommentTimestamp);
+    }
+}
+
+function updateMobileCommentTimestamp() {
+    const timestampSpan = document.getElementById('mobileCommentTimestamp');
+    if (!timestampSpan || !fullVideoElement) return;
+    
+    const time = fullVideoElement.currentTime;
+    const hours = Math.floor(time / 3600);
+    const minutes = Math.floor((time % 3600) / 60);
+    const seconds = Math.floor(time % 60);
+    timestampSpan.textContent = `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+}
+
+async function saveMobileComment() {
+    const textarea = document.getElementById('mobileCommentText');
+    if (!textarea || !fullVideoElement || !currentFileId) return;
+    
+    const text = textarea.value.trim();
+    if (!text) {
+        showNotification('Please enter a comment', 'error');
+        return;
+    }
+    
+    const timestamp = fullVideoElement.currentTime;
+    
+    try {
+        const response = await fetch(`/api/files/${currentFileId}/comments`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text, timestamp })
+        });
+        
+        if (response.ok) {
+            const result = await response.json();
+            videoComments.push(result.comment);
+            textarea.value = '';
+            showNotification('Comment added', 'success');
+            loadGeneralComments(); // Update desktop panel too
+            renderVideoCommentMarkers();
+        } else {
+            showNotification('Error adding comment', 'error');
+        }
+    } catch (error) {
+        console.error('Comment error:', error);
+        showNotification('Error adding comment', 'error');
+    }
+}
+
+function updateButtonOpacity(e) {
+    const opacity = e.target.value / 100;
+    // Apply to all video overlays and controls
+    const elements = document.querySelectorAll('.video-control-btn, .mobile-caption-overlay, .mobile-comment-input, .video-comments-timeline, .comment-marker, .opacity-control');
+    elements.forEach(el => {
+        el.style.opacity = opacity;
+    });
+}
+
+function updateVideoProgress() {
+    if (!fullVideoElement) return;
+    const progressFill = document.getElementById('videoProgressFill');
+    const timeDisplay = document.getElementById('videoTimelineTime');
+    if (!progressFill) return;
+    
+    const percent = (fullVideoElement.currentTime / fullVideoElement.duration) * 100;
+    progressFill.style.width = `${percent}%`;
+    
+    // Update time display
+    if (timeDisplay) {
+        const currentTime = fullVideoElement.currentTime;
+        const minutes = Math.floor(currentTime / 60);
+        const seconds = Math.floor(currentTime % 60);
+        timeDisplay.textContent = `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+    }
+}
+
+function seekVideo(e) {
+    if (!fullVideoElement) return;
+    const progressBar = document.getElementById('videoProgressBar');
+    const rect = progressBar.getBoundingClientRect();
+    const clickX = e.clientX - rect.left;
+    const percent = Math.max(0, Math.min(1, clickX / rect.width));
+    fullVideoElement.currentTime = percent * fullVideoElement.duration;
+}
+
+// Enable drag-to-seek on progress bar
+let isDragging = false;
+
+document.addEventListener('DOMContentLoaded', () => {
+    const progressBar = document.getElementById('videoProgressBar');
+    if (!progressBar) return;
+    
+    const startDrag = (e) => {
+        isDragging = true;
+        progressBar.classList.add('dragging');
+        updateSeekPosition(e);
+    };
+    
+    const updateSeekPosition = (e) => {
+        if (!isDragging || !fullVideoElement) return;
+        e.preventDefault();
+        
+        const rect = progressBar.getBoundingClientRect();
+        const clientX = e.type.includes('touch') ? e.touches[0].clientX : e.clientX;
+        const clickX = clientX - rect.left;
+        const percent = Math.max(0, Math.min(1, clickX / rect.width));
+        fullVideoElement.currentTime = percent * fullVideoElement.duration;
+    };
+    
+    const endDrag = () => {
+        isDragging = false;
+        progressBar.classList.remove('dragging');
+    };
+    
+    // Mouse events
+    progressBar.addEventListener('mousedown', startDrag);
+    document.addEventListener('mousemove', updateSeekPosition);
+    document.addEventListener('mouseup', endDrag);
+    
+    // Touch events for mobile
+    progressBar.addEventListener('touchstart', startDrag);
+    document.addEventListener('touchmove', updateSeekPosition);
+    document.addEventListener('touchend', endDrag);
+});
+
+function togglePlayPause() {
+    if (!fullVideoElement) return;
+    if (fullVideoElement.paused) {
+        fullVideoElement.play();
+    } else {
+        fullVideoElement.pause();
+    }
+}
+
+function skipVideo(seconds) {
+    if (!fullVideoElement) return;
+    fullVideoElement.currentTime = Math.max(0, fullVideoElement.currentTime + seconds);
+}
+
+function updatePlayPauseIcon() {
+    const icon = document.getElementById('playPauseIcon');
+    if (!icon || !fullVideoElement) return;
+    icon.textContent = fullVideoElement.paused ? '▶' : '⏸';
 }
 
 // Auth functions
@@ -697,6 +866,12 @@ async function handleUpload(e) {
                 if (results.matched.length > 0) {
                     message += `\n✓ Matched ${results.matched.length} video(s)`;
                 }
+                if (results.stacked && results.stacked.length > 0) {
+                    message += `\n📚 Stacked ${results.stacked.length} version(s)`;
+                }
+                if (results.warnings && results.warnings.length > 0) {
+                    message += `\n⚠ ${results.warnings.length} warning(s)`;
+                }
                 if (results.unmatched.captions.length > 0) {
                     message += `\n⚠ ${results.unmatched.captions.length} caption file(s) without matching video`;
                 }
@@ -708,6 +883,19 @@ async function handleUpload(e) {
                 }
                 
                 progressText.textContent = message;
+                
+                // Show version warnings
+                if (results.warnings && results.warnings.length > 0) {
+                    let warningMessage = '⚠️ Version Upload Warnings:\n\n';
+                    results.warnings.forEach(warning => {
+                        warningMessage += `${warning.message}\n\n`;
+                    });
+                    warningMessage += '💡 Tip: Upload the matching caption file (.csv or .srt) with the same name as the new video version to update the captions.';
+                    
+                    setTimeout(() => {
+                        alert(warningMessage);
+                    }, 500);
+                }
                 
                 // Show mismatches alert if any
                 if (results.unmatched.captions.length > 0 || results.unmatched.videos.length > 0) {
@@ -730,12 +918,15 @@ async function handleUpload(e) {
                     
                     setTimeout(() => {
                         alert(alertMessage);
-                    }, 500);
+                    }, results.warnings && results.warnings.length > 0 ? 2000 : 500);
                 }
                 
                 setTimeout(() => {
                     closeUploadModal();
-                    showNotification(`Bulk upload complete: ${results.created.length} files created`, 'success');
+                    const successMsg = results.stacked && results.stacked.length > 0 
+                        ? `Bulk upload complete: ${results.created.length} files created, ${results.stacked.length} versions stacked`
+                        : `Bulk upload complete: ${results.created.length} files created`;
+                    showNotification(successMsg, 'success');
                     loadFiles();
                 }, 2500);
             } else {
@@ -816,12 +1007,21 @@ async function handleUpload(e) {
                 });
                 
                 if (videoResponse.ok) {
+                    const videoResult = await videoResponse.json();
                     progressBar.style.width = '100%';
-                    progressText.textContent = `Complete! Caption file and video uploaded successfully`;
+                    
+                    if (videoResult.isNewVersion && videoResult.warning) {
+                        progressText.textContent = `Complete! New version uploaded. ${videoResult.warning}`;
+                        setTimeout(() => {
+                            alert(`⚠️ ${videoResult.warning}`);
+                        }, 500);
+                    } else {
+                        progressText.textContent = `Complete! Caption file and video uploaded successfully`;
+                    }
                     
                     setTimeout(() => {
                         closeUploadModal();
-                        showNotification('File pair uploaded successfully', 'success');
+                        showNotification(videoResult.isNewVersion ? 'New version uploaded successfully' : 'File pair uploaded successfully', 'success');
                         loadFiles();
                     }, 1500);
                 } else {
@@ -1129,6 +1329,11 @@ function renderFileCard(file) {
     const videoBadge = file.hasVideo ? '<span class="video-badge">🎥</span>' : '';
     const commentBadge = file.commentCount > 0 ? `<span class="comment-badge">💬 ${file.commentCount}</span>` : '';
     
+    // Version badge for stacked files
+    const versionBadge = file.isStacked && file.versionCount > 0 
+        ? `<span class="version-badge" title="${file.versionCount} version(s) stacked">📚 v${file.versionCount}</span>` 
+        : '';
+    
     // Thumbnail display
     let thumbnailHtml = '';
     if (file.thumbnailFile) {
@@ -1151,7 +1356,7 @@ function renderFileCard(file) {
     ` : '';
     
     return `
-        <div class="file-card ${file.completed ? 'completed' : ''} ${selectedFiles.has(file.id) ? 'selected' : ''}" onclick="openFile('${file.id}')">
+        <div class="file-card ${file.completed ? 'completed' : ''} ${selectedFiles.has(file.id) ? 'selected' : ''} ${file.isStacked ? 'stacked' : ''}" onclick="openFile('${file.id}')">
             ${checkboxHtml}
             ${thumbnailHtml}
             <div class="file-card-content">
@@ -1165,6 +1370,7 @@ function renderFileCard(file) {
                             <div class="file-badges">
                                 ${videoBadge}
                                 ${commentBadge}
+                                ${versionBadge}
                             </div>
                         </div>
                     </div>
@@ -1236,6 +1442,7 @@ async function openFile(fileId) {
         isCompleted = fileData.completed || false;
         currentVideoFile = fileData.videoFile || null;
         videoComments = fileData.videoComments || [];
+        renderVideoCommentMarkers();
 
         console.log('File opened:', fileData.originalName);
         console.log('Video file:', currentVideoFile);
@@ -1287,9 +1494,9 @@ async function openFile(fileId) {
     }
 }
 
-// Check if we're in shared folder mode (viewing via /folder/:id URL and not admin)
+// Check if we're in shared / read-only mode (any viewer who is NOT admin)
 function isSharedMode() {
-    return selectedFolder !== null && !isAdmin;
+    return !isAdmin;
 }
 
 // Hide/show elements based on shared mode
@@ -1329,6 +1536,22 @@ function updateUIForSharedMode() {
         } else {
             filterControls.style.display = '';
         }
+    }
+}
+
+// Toggle header controls (useful on mobile to free space)
+function toggleEditorControls() {
+    const editorSection = document.getElementById('editorSection');
+    const headerTop = document.querySelector('.editor-header-top');
+    const actions = document.querySelector('.editor-actions');
+    const btn = document.getElementById('toggleEditorControlsBtn');
+    if (!editorSection || !headerTop || !actions || !btn) return;
+    
+    const collapsed = editorSection.classList.toggle('editor-controls-collapsed');
+    if (collapsed) {
+        btn.textContent = 'Show Controls';
+    } else {
+        btn.textContent = 'Hide Controls';
     }
 }
 
@@ -1715,6 +1938,11 @@ function setupVideoSection() {
         
         // Show full video section if video exists
         fullVideoSection.style.display = videoMode === 'full' ? 'block' : 'none';
+        
+        // Initialize mobile overlay on video load
+        fullVideoElement.addEventListener('loadedmetadata', () => {
+            updateMobileCaptionOverlay(0);
+        }, { once: true });
     } else {
         fullVideoSection.style.display = 'none';
     }
@@ -1919,14 +2147,97 @@ function updateTimestampDisplay() {
         
         // Update caption check table highlight
         updateCaptionCheckTableHighlight();
+        
+        // Update mobile caption overlay
+        updateMobileCaptionOverlay(currentTime);
     } else {
         if (captionDiv) captionDiv.classList.remove('visible');
         
         // Clear highlight if no segment
         const rows = document.querySelectorAll('#captionCheckBody tr');
         rows.forEach(row => row.classList.remove('current-segment'));
+        
+        // Update mobile overlay anyway (might be at start/end)
+        updateMobileCaptionOverlay(currentTime);
     }
 }
+
+function updateMobileCaptionOverlay(currentTime) {
+    const mobileBody = document.getElementById('mobileCaptionBody');
+    const mobileOverlay = document.getElementById('mobileCaptionOverlay');
+    const videoCommentsMode = document.getElementById('videoCommentsMode');
+    
+    if (!mobileBody || !mobileOverlay) return;
+    
+    // Only show on mobile AND when in Caption Checking Mode
+    const isMobile = window.innerWidth <= 768;
+    const isCommentsMode = videoCommentsMode && videoCommentsMode.checked;
+    
+    if (isMobile && !isCommentsMode) {
+        mobileOverlay.style.display = 'block';
+    } else {
+        mobileOverlay.style.display = 'none';
+        return;
+    }
+    
+    // Find current segment index
+    let currentIndex = -1;
+    for (let i = 0; i < currentData.length; i++) {
+        const start = parseFloat(currentData[i].start_seconds || 0);
+        const end = parseFloat(currentData[i].end_seconds || 0);
+        if (currentTime >= start && currentTime < end) {
+            currentIndex = i;
+            break;
+        }
+    }
+    
+    // Show 4 rows: 1 before current, current, 2 after
+    const startIdx = Math.max(0, currentIndex - 1);
+    const endIdx = Math.min(currentData.length, startIdx + 4);
+    const visibleRows = currentData.slice(startIdx, endIdx);
+    
+    mobileBody.innerHTML = visibleRows.map((row, localIdx) => {
+        const globalIdx = startIdx + localIdx;
+        const isCurrent = globalIdx === currentIndex;
+        const start = parseFloat(row.start_seconds || 0).toFixed(2);
+        const end = parseFloat(row.end_seconds || 0).toFixed(2);
+        
+        return `
+            <tr class="${isCurrent ? 'current-caption-row' : ''}" 
+                data-index="${globalIdx}"
+                onclick="jumpToMobileCaptionRow(${globalIdx})">
+                <td>${start}</td>
+                <td>${end}</td>
+                <td>
+                    <input type="text" 
+                           class="mobile-text-edit" 
+                           value="${(row.text || '').replace(/"/g, '&quot;')}"
+                           data-index="${globalIdx}"
+                           onclick="event.stopPropagation()"
+                           onchange="updateCaptionTextMobile(${globalIdx}, this.value)">
+                </td>
+            </tr>
+        `;
+    }).join('');
+}
+
+function updateCaptionTextMobile(index, newText) {
+    if (!currentData[index]) return;
+    currentData[index].text = newText;
+    saveChanges(); // Auto-save on edit
+}
+
+// Jump video when tapping caption rows in mobile overlay
+window.jumpToMobileCaptionRow = function(index) {
+    if (!fullVideoElement || !currentData[index]) return;
+    const startTime = parseFloat(currentData[index].start_seconds || 0);
+    fullVideoElement.currentTime = startTime;
+    
+    // Update progress bar immediately
+    updateVideoProgress();
+    
+    fullVideoElement.play();
+};
 
 function toggleCaptionDisplay() {
     const captionDiv = document.getElementById('videoCaption');
@@ -2040,10 +2351,26 @@ function toggleVideoCommentsMode() {
     const modeLabelLeft = document.getElementById('modeLabelLeft');
     const modeLabelRight = document.getElementById('modeLabelRight');
     
+    // Mobile overlays
+    const mobileCaptionOverlay = document.getElementById('mobileCaptionOverlay');
+    const mobileCommentInput = document.getElementById('mobileCommentInput');
+    const commentsTimeline = document.getElementById('videoCommentsTimeline');
+    const isMobile = window.innerWidth <= 768;
+    
     if (isChecked) {
-        // Video Comments Mode: Show comments panel on right
-        captionCheckTable.style.display = 'none';
-        videoCommentsPanel.style.display = 'block';
+        // Video Comments Mode
+        if (captionCheckTable) captionCheckTable.style.display = 'none';
+        if (videoCommentsPanel) videoCommentsPanel.style.display = 'block';
+        
+        // Always hide caption overlay, show comment input on mobile
+        if (mobileCaptionOverlay) mobileCaptionOverlay.style.display = 'none';
+        if (isMobile && mobileCommentInput) {
+            mobileCommentInput.style.display = 'flex';
+        } else if (mobileCommentInput) {
+            mobileCommentInput.style.display = 'none';
+        }
+        renderVideoCommentMarkers();
+        
         // Only show export button if not in shared mode
         if (exportBtn && !isSharedMode()) {
             exportBtn.style.display = 'inline-block';
@@ -2053,14 +2380,46 @@ function toggleVideoCommentsMode() {
         if (modeLabelRight) modeLabelRight.classList.add('active');
         loadGeneralComments();
     } else {
-        // Default Mode: Show caption check on right
-        captionCheckTable.style.display = 'block';
-        videoCommentsPanel.style.display = 'none';
+        // Caption Checking Mode
+        if (captionCheckTable) captionCheckTable.style.display = 'block';
+        if (videoCommentsPanel) videoCommentsPanel.style.display = 'none';
+        
+        // Always hide comment input
+        if (mobileCommentInput) mobileCommentInput.style.display = 'none';
+        
+        // Show caption table only on mobile
+        if (isMobile && mobileCaptionOverlay) {
+            mobileCaptionOverlay.style.display = 'block';
+        }
+        
         if (exportBtn) exportBtn.style.display = 'none';
         // Update labels
         if (modeLabelLeft) modeLabelLeft.classList.add('active');
         if (modeLabelRight) modeLabelRight.classList.remove('active');
     }
+}
+
+function renderVideoCommentMarkers() {
+    const timeline = document.getElementById('videoCommentsTimeline');
+    if (!timeline || !fullVideoElement) return;
+    
+    const duration = fullVideoElement.duration || 1;
+    
+    timeline.innerHTML = videoComments.map(comment => {
+        if (!comment.timestamp) return '';
+        const percent = (comment.timestamp / duration) * 100;
+        return `<div class="comment-marker" style="left: ${percent}%"
+                     title="${comment.text}"
+                     onclick="jumpToComment(${comment.timestamp})"></div>`;
+    }).join('');
+    
+    timeline.style.display = videoComments.length ? 'block' : 'none';
+}
+
+function jumpToComment(timestamp) {
+    if (!fullVideoElement) return;
+    fullVideoElement.currentTime = timestamp;
+    fullVideoElement.play();
 }
 
 function renderCaptionCheckTable() {
@@ -2282,6 +2641,8 @@ function loadGeneralComments() {
             `;
         }).join('');
     }
+
+    renderVideoCommentMarkers();
 }
 
 function formatTimestamp(seconds) {

@@ -51,6 +51,49 @@ function normalizeFilename(filename) {
   return filename.replace(/\.(csv|srt|mp4|webm|mov|avi)$/i, '').replace(/_split$/i, '');
 }
 
+// Helper function to extract base name and version from filename
+// Example: LT0023_B251106_Person13+NL_689_v001 -> base: LT0023_B251106_Person13+NL_689, version: v001
+function extractBaseNameAndVersion(filename) {
+  const nameWithoutExt = filename.replace(/\.(csv|srt|mp4|webm|mov|avi)$/i, '');
+  
+  // Match version pattern: _v001, _v0001, _v1, etc. at the end
+  const versionMatch = nameWithoutExt.match(/_v(\d+)$/i);
+  
+  if (versionMatch) {
+    const version = '_v' + versionMatch[1].padStart(3, '0'); // Normalize to v001 format
+    const baseName = nameWithoutExt.substring(0, nameWithoutExt.length - versionMatch[0].length);
+    return { baseName, version };
+  }
+  
+  // No version found, return entire name as base
+  return { baseName: nameWithoutExt, version: null };
+}
+
+// Helper function to find existing file entry by base name
+function findFileByBaseName(baseName, folderId = null) {
+  const files = fs.readdirSync(dataDir)
+    .filter(f => f.endsWith('.json'))
+    .map(f => {
+      try {
+        const content = JSON.parse(fs.readFileSync(path.join(dataDir, f), 'utf-8'));
+        return { id: content.id, ...content };
+      } catch (e) {
+        return null;
+      }
+    })
+    .filter(f => f !== null);
+  
+  // Find file with matching base name
+  for (const file of files) {
+    const fileBase = extractBaseNameAndVersion(file.originalName).baseName;
+    if (fileBase === baseName && (!folderId || file.folderId === folderId)) {
+      return file;
+    }
+  }
+  
+  return null;
+}
+
 function isCaptionFile(filename) {
   return CAPTION_EXTENSIONS.includes(path.extname(filename).toLowerCase());
 }
@@ -347,7 +390,7 @@ app.post('/api/upload', requireAdmin, uploadLimiter, uploadCSV.single('file'), (
   }
 });
 
-// Bulk upload with automatic video/CSV pairing (admin only)
+// Bulk upload with automatic video/CSV pairing and version stacking (admin only)
 app.post('/api/upload-bulk', requireAdmin, uploadLimiter, uploadBulk.array('files', 200), async (req, res) => {
   try {
     console.log('Bulk upload endpoint hit');
@@ -371,23 +414,82 @@ app.post('/api/upload-bulk', requireAdmin, uploadLimiter, uploadBulk.array('file
     const results = {
       created: [],
       matched: [],
+      stacked: [], // New: versions that were stacked
+      warnings: [], // New: warnings about missing captions for new versions
       unmatched: { captions: [], videos: [] },
       errors: []
     };
     
     const folderId = req.body.folderId || null;
     
-    // Process caption files and try to match with videos
+    // First pass: Check for version matches and generate warnings
+    const versionWarnings = [];
+    const videosToStack = [];
+    
+    for (const videoFile of videoFiles) {
+      const { baseName, version } = extractBaseNameAndVersion(videoFile.originalname);
+      
+      if (version) {
+        // This is a versioned video, check if base exists
+        const existingFile = findFileByBaseName(baseName, folderId);
+        
+        if (existingFile) {
+          // Found existing file with same base name
+          // Check if caption file exists for this version
+          const captionForVersion = captionFiles.find(cf => {
+            const capBase = extractBaseNameAndVersion(cf.originalname).baseName;
+            return capBase === baseName;
+          });
+          
+          if (!captionForVersion) {
+            const expectedCaptionName = baseName + (extractBaseNameAndVersion(videoFile.originalname).version || '') + '.csv';
+            versionWarnings.push({
+              video: videoFile.originalname,
+              baseName: baseName,
+              existingFile: existingFile.originalName,
+              expectedCaption: expectedCaptionName,
+              message: `⚠️ New video version detected: ${videoFile.originalname}\n\nNo matching caption file found for this new version.\nExpected caption file: ${expectedCaptionName} (or .srt)\n\nThe new video will temporarily use captions from the previous version (${existingFile.originalName}).\n\nYou can upload the matching caption file separately if needed.`
+            });
+          }
+          
+          videosToStack.push({
+            videoFile: videoFile,
+            existingFile: existingFile,
+            captionFile: captionForVersion || null
+          });
+        }
+      }
+    }
+    
+    // Add warnings to results
+    results.warnings = versionWarnings;
+    
+    // Process caption files first (non-versioned and new versions)
+    const processedCaptions = new Set();
+    
     for (const captionFile of captionFiles) {
       try {
         const records = parseCaptionFile(captionFile.path, captionFile.originalname);
-        
+        const { baseName, version } = extractBaseNameAndVersion(captionFile.originalname);
         const captionNormalized = normalizeFilename(captionFile.originalname);
         const groupKey = extractGroupKey(captionFile.originalname);
         
-        // Try to find matching video
+        // Check if this caption is for a version that needs stacking
+        const stackInfo = videosToStack.find(s => {
+          const stackBase = extractBaseNameAndVersion(s.videoFile.originalname).baseName;
+          return stackBase === baseName && s.captionFile === captionFile;
+        });
+        
+        if (stackInfo) {
+          // This caption is for a versioned video that will be stacked
+          processedCaptions.add(captionFile.originalname);
+          continue; // Will be processed in stacking logic below
+        }
+        
+        // Try to find matching video (non-versioned matching)
         let matchedVideo = null;
         const videoMatch = videoFiles.find(vf => {
+          if (videosToStack.find(s => s.videoFile === vf)) return false; // Skip videos that will be stacked
           const videoNormalized = normalizeFilename(vf.originalname);
           return captionNormalized === videoNormalized;
         });
@@ -421,7 +523,42 @@ app.post('/api/upload-bulk', requireAdmin, uploadLimiter, uploadBulk.array('file
           results.unmatched.captions.push(captionFile.originalname);
         }
         
-        // Create file entry
+        // Check if this caption is for an existing versioned file
+        const existingFile = findFileByBaseName(baseName, folderId);
+        if (existingFile && version && !matchedVideo) {
+          // This is a new caption for an existing versioned file
+          // Stack it as a new version
+          const existingVersions = existingFile.versions || [];
+          const newVersion = {
+            version: version,
+            originalName: captionFile.originalname,
+            uploadDate: new Date().toISOString(),
+            data: records,
+            videoFile: null, // No video for this caption-only version
+            thumbnailFile: null
+          };
+          
+          existingVersions.push(newVersion);
+          existingFile.versions = existingVersions;
+          existingFile.lastModified = new Date().toISOString();
+          
+          // Update the file entry
+          const filePath = path.join(dataDir, `${existingFile.id}.json`);
+          fs.writeFileSync(filePath, JSON.stringify(existingFile, null, 2));
+          
+          results.stacked.push({
+            baseName: baseName,
+            version: version,
+            type: 'caption',
+            name: captionFile.originalname
+          });
+          
+          processedCaptions.add(captionFile.originalname);
+          fs.unlinkSync(captionFile.path);
+          continue;
+        }
+        
+        // Create new file entry (non-versioned or first version)
         const fileId = Date.now().toString() + '-' + Math.random().toString(36).substr(2, 9);
         const dataFile = {
           id: fileId,
@@ -433,6 +570,7 @@ app.post('/api/upload-bulk', requireAdmin, uploadLimiter, uploadBulk.array('file
           folderId: folderId,
           videoComments: [],
           groupKey: groupKey,
+          versions: version ? [{ version, originalName: captionFile.originalname, uploadDate: new Date().toISOString(), data: records }] : [],
           data: records
         };
         
@@ -445,11 +583,13 @@ app.post('/api/upload-bulk', requireAdmin, uploadLimiter, uploadBulk.array('file
           id: fileId,
           name: captionFile.originalname,
           hasVideo: !!matchedVideo,
-          groupKey: groupKey
+          groupKey: groupKey,
+          isVersioned: !!version
         });
         
-        // Clean up uploaded CSV
+        // Clean up uploaded caption file
         fs.unlinkSync(captionFile.path);
+        processedCaptions.add(captionFile.originalname);
         
       } catch (error) {
         console.error('Error processing caption file:', captionFile.originalname, error);
@@ -464,14 +604,119 @@ app.post('/api/upload-bulk', requireAdmin, uploadLimiter, uploadBulk.array('file
       }
     }
     
-    // Report unmatched videos
-    videoFiles.forEach(vf => {
-      results.unmatched.videos.push(vf.originalname);
-      // Clean up unmatched video files
-      if (fs.existsSync(vf.path)) {
-        fs.unlinkSync(vf.path);
+    // Process version stacking for videos
+    for (const stackInfo of videosToStack) {
+      try {
+        const { videoFile, existingFile, captionFile } = stackInfo;
+        const { version } = extractBaseNameAndVersion(videoFile.originalname);
+        
+        // Generate thumbnail for new video version
+        let thumbnailFile = null;
+        const thumbnailFilename = `thumb-${videoFile.filename}.png`;
+        const thumbnailPath = path.join(thumbnailDir, thumbnailFilename);
+        const videoPath = path.join(uploadDir, videoFile.filename);
+        
+        try {
+          await generateThumbnail(videoPath, thumbnailPath);
+          thumbnailFile = thumbnailFilename;
+        } catch (thumbError) {
+          console.error('Failed to generate thumbnail for:', videoFile.originalname, thumbError);
+        }
+        
+        // Load existing file data
+        const filePath = path.join(dataDir, `${existingFile.id}.json`);
+        const fileData = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+        
+        // Initialize versions array if not exists
+        if (!fileData.versions) {
+          fileData.versions = [];
+          // Add current file as first version
+          fileData.versions.push({
+            version: extractBaseNameAndVersion(fileData.originalName).version || '_v001',
+            originalName: fileData.originalName,
+            uploadDate: fileData.uploadDate,
+            data: fileData.data,
+            videoFile: fileData.videoFile,
+            thumbnailFile: fileData.thumbnailFile
+          });
+        }
+        
+        // Parse caption if provided
+        let captionData = null;
+        if (captionFile) {
+          try {
+            captionData = parseCaptionFile(captionFile.path, captionFile.originalname);
+            fs.unlinkSync(captionFile.path);
+          } catch (capError) {
+            console.error('Error parsing caption for version:', captionFile.originalname, capError);
+          }
+        }
+        
+        // Add new version
+        const newVersion = {
+          version: version,
+          originalName: videoFile.originalname,
+          uploadDate: new Date().toISOString(),
+          data: captionData || fileData.data, // Use new caption or fall back to existing
+          videoFile: videoFile.filename,
+          thumbnailFile: thumbnailFile
+        };
+        
+        fileData.versions.push(newVersion);
+        
+        // Update main file to use latest version
+        fileData.videoFile = videoFile.filename;
+        fileData.thumbnailFile = thumbnailFile;
+        fileData.originalName = videoFile.originalname; // Update to latest version name
+        fileData.data = newVersion.data; // Update to latest caption data
+        fileData.lastModified = new Date().toISOString();
+        
+        // Save updated file
+        fs.writeFileSync(filePath, JSON.stringify(fileData, null, 2));
+        
+        results.stacked.push({
+          baseName: extractBaseNameAndVersion(videoFile.originalname).baseName,
+          version: version,
+          type: 'video',
+          name: videoFile.originalname,
+          hasCaption: !!captionData
+        });
+        
+        // Remove from videoFiles list
+        const index = videoFiles.indexOf(videoFile);
+        if (index > -1) videoFiles.splice(index, 1);
+        
+      } catch (error) {
+        console.error('Error stacking version:', videoFile.originalname, error);
+        results.errors.push({
+          file: videoFile.originalname,
+          error: error.message
+        });
+        // Clean up on error
+        if (fs.existsSync(videoFile.path)) {
+          fs.unlinkSync(videoFile.path);
+        }
       }
-    });
+    }
+    
+    // Process remaining unmatched videos (non-versioned, no matching caption)
+    for (const videoFile of videoFiles) {
+      // Check if this video matches any remaining caption files
+      const videoNormalized = normalizeFilename(videoFile.originalname);
+      const captionMatch = captionFiles.find(cf => {
+        if (processedCaptions.has(cf.originalname)) return false;
+        const captionNormalized = normalizeFilename(cf.originalname);
+        return captionNormalized === videoNormalized;
+      });
+      
+      if (!captionMatch) {
+        results.unmatched.videos.push(videoFile.originalname);
+        // Clean up unmatched video files
+        if (fs.existsSync(videoFile.path)) {
+          fs.unlinkSync(videoFile.path);
+        }
+      }
+    }
     
     console.log('Bulk upload results:', JSON.stringify(results, null, 2));
     res.json(results);
@@ -573,17 +818,22 @@ app.get('/api/files', (req, res) => {
       .filter(f => f.endsWith('.json'))
       .map(f => {
         const content = JSON.parse(fs.readFileSync(path.join(dataDir, f), 'utf-8'));
+        const { baseName, version } = extractBaseNameAndVersion(content.originalName);
         return {
           id: content.id,
           name: content.originalName,
+          baseName: baseName,
+          version: version,
           uploadDate: content.uploadDate,
-          rowCount: content.data.length,
+          rowCount: content.data ? content.data.length : 0,
           completed: content.completed || false,
           folderId: content.folderId || null,
           groupKey: content.groupKey || null,
           hasVideo: !!content.videoFile,
           thumbnailFile: content.thumbnailFile || null,
-          commentCount: (content.videoComments || []).length
+          commentCount: (content.videoComments || []).length,
+          versionCount: content.versions ? content.versions.length : 0,
+          isStacked: !!(content.versions && content.versions.length > 0)
         };
       })
       .filter(file => !folderId || file.folderId === folderId)
@@ -748,7 +998,7 @@ app.get('/api/files/:id/export-srt', requireAdmin, (req, res) => {
   }
 });
 
-// Upload video for a file (admin only)
+// Upload video for a file (admin only) - supports version stacking
 app.post('/api/files/:id/upload-video', requireAdmin, uploadVideo.single('video'), async (req, res) => {
   try {
     const filePath = path.join(dataDir, `${req.params.id}.json`);
@@ -757,46 +1007,99 @@ app.post('/api/files/:id/upload-video', requireAdmin, uploadVideo.single('video'
     }
     
     const fileData = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    const { baseName, version } = extractBaseNameAndVersion(req.file.originalname);
     
-    // Delete old video if exists
-    if (fileData.videoFile) {
-      const oldVideoPath = path.join(uploadDir, fileData.videoFile);
-      if (fs.existsSync(oldVideoPath)) {
-        fs.unlinkSync(oldVideoPath);
-      }
-      // Delete old thumbnail
-      if (fileData.thumbnailFile) {
-        const oldThumbnailPath = path.join(thumbnailDir, fileData.thumbnailFile);
-        if (fs.existsSync(oldThumbnailPath)) {
-          fs.unlinkSync(oldThumbnailPath);
-        }
-      }
-    }
-    
-    // Save new video filename
-    fileData.videoFile = req.file.filename;
+    // Check if this is a new version
+    const isNewVersion = version && extractBaseNameAndVersion(fileData.originalName).baseName === baseName;
     
     // Generate thumbnail
     const thumbnailFilename = `thumb-${req.file.filename}.png`;
     const thumbnailPath = path.join(thumbnailDir, thumbnailFilename);
     const videoPath = path.join(uploadDir, req.file.filename);
     
+    let thumbnailFile = null;
     try {
       await generateThumbnail(videoPath, thumbnailPath);
-      fileData.thumbnailFile = thumbnailFilename;
+      thumbnailFile = thumbnailFilename;
       console.log('Thumbnail generated:', thumbnailFilename);
     } catch (thumbError) {
       console.error('Failed to generate thumbnail, continuing without it:', thumbError);
-      fileData.thumbnailFile = null;
     }
     
-    fs.writeFileSync(filePath, JSON.stringify(fileData, null, 2));
-    
-    res.json({ 
-      success: true, 
-      videoFile: req.file.filename,
-      thumbnailFile: fileData.thumbnailFile
-    });
+    if (isNewVersion) {
+      // This is a new version - stack it
+      if (!fileData.versions) {
+        fileData.versions = [];
+        // Add current file as first version
+        fileData.versions.push({
+          version: extractBaseNameAndVersion(fileData.originalName).version || '_v001',
+          originalName: fileData.originalName,
+          uploadDate: fileData.uploadDate,
+          data: fileData.data,
+          videoFile: fileData.videoFile,
+          thumbnailFile: fileData.thumbnailFile
+        });
+      }
+      
+      // Add new version
+      const newVersion = {
+        version: version,
+        originalName: req.file.originalname,
+        uploadDate: new Date().toISOString(),
+        data: fileData.data, // Keep existing caption data (user can upload new caption separately)
+        videoFile: req.file.filename,
+        thumbnailFile: thumbnailFile
+      };
+      
+      fileData.versions.push(newVersion);
+      
+      // Update main file to use latest version
+      // Don't delete old video - keep it in versions array
+      fileData.videoFile = req.file.filename;
+      fileData.thumbnailFile = thumbnailFile;
+      fileData.originalName = req.file.originalname; // Update to latest version name
+      fileData.lastModified = new Date().toISOString();
+      
+      fs.writeFileSync(filePath, JSON.stringify(fileData, null, 2));
+      
+      res.json({ 
+        success: true, 
+        videoFile: req.file.filename,
+        thumbnailFile: thumbnailFile,
+        isNewVersion: true,
+        version: version,
+        warning: 'New video version uploaded. Consider uploading matching caption file if available.'
+      });
+    } else {
+      // Regular video upload (replace existing)
+      // Delete old video if exists
+      if (fileData.videoFile) {
+        const oldVideoPath = path.join(uploadDir, fileData.videoFile);
+        if (fs.existsSync(oldVideoPath)) {
+          fs.unlinkSync(oldVideoPath);
+        }
+        // Delete old thumbnail
+        if (fileData.thumbnailFile) {
+          const oldThumbnailPath = path.join(thumbnailDir, fileData.thumbnailFile);
+          if (fs.existsSync(oldThumbnailPath)) {
+            fs.unlinkSync(oldThumbnailPath);
+          }
+        }
+      }
+      
+      // Save new video filename
+      fileData.videoFile = req.file.filename;
+      fileData.thumbnailFile = thumbnailFile;
+      fileData.lastModified = new Date().toISOString();
+      
+      fs.writeFileSync(filePath, JSON.stringify(fileData, null, 2));
+      
+      res.json({ 
+        success: true, 
+        videoFile: req.file.filename,
+        thumbnailFile: thumbnailFile
+      });
+    }
   } catch (error) {
     console.error('Error uploading video:', error);
     res.status(500).json({ error: 'Failed to upload video' });

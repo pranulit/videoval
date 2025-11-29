@@ -232,10 +232,30 @@
         <!-- CSV Editor -->
         <div id="editorSection" class="editor-section" style="display: none;">
             <div class="editor-header">
-                <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
-                    <h2 id="currentFileName">File Name</h2>
+                <div class="editor-header-top">
+                    <div class="editor-title-row">
+                        <h2 id="currentFileName">File Name</h2>
+                        <div class="header-primary-actions">
+                            <button id="videoModeBtn" class="btn-header-action btn-mode">Table Mode</button>
+                            <button id="saveBtn" class="btn-header-action btn-save">Save Changes</button>
+                            <button type="button" id="closeEditorBtn" class="btn-header-action btn-close">Close</button>
+                        </div>
+                    </div>
                 </div>
                 <div class="editor-actions">
+                    <div class="editor-meta-row">
+                        <div class="stat-duration-badge" id="totalDurationBadge">
+                            <span id="statsTotalDuration">Total Duration: 0s</span>
+                        </div>
+                        <div class="completion-toggle">
+                            <label>
+                                <input type="checkbox" id="completionCheckbox">
+                                Mark as Completed
+                            </label>
+                        </div>
+                    </div>
+                    
+                    <!-- Admin-only controls -->
                     <div class="filter-controls">
                         <label>
                             <input type="checkbox" id="filterKeep" checked> Show Keep
@@ -245,24 +265,15 @@
                         </label>
                     </div>
                     <button id="columnToggleBtn" class="btn btn-secondary btn-sm">Toggle Columns</button>
-                    <button id="videoModeBtn" class="btn btn-secondary btn-sm">Full Video Mode</button>
                     <div class="stats">
                         <span id="statsKeep" class="stat-badge stat-keep">Keep: 0</span>
                         <span id="statsCut" class="stat-badge stat-cut">Cut: 0</span>
                         <span id="statsKeepDuration" class="stat-badge stat-duration-keep">Keep Duration: 0s</span>
-                        <span id="statsTotalDuration" class="stat-badge stat-duration-total">Total Duration: 0s</span>
                     </div>
-                    <div class="completion-toggle">
-                        <label>
-                            <input type="checkbox" id="completionCheckbox">
-                            Mark as Completed
-                        </label>
-                    </div>
-                    <button id="saveBtn" class="btn btn-success">Save Changes</button>
                     <button id="downloadBtn" class="btn btn-primary" style="display: none;">Download CSV</button>
                     <button id="exportSrtBtn" class="btn btn-primary" style="display: none;">Export SRT</button>
-                    <button type="button" id="closeEditorBtn" class="btn btn-danger">Close</button>
                 </div>
+                <button id="toggleEditorControlsBtn" class="btn-header-toggle">Hide Controls</button>
             </div>
             
             <!-- Column Visibility Panel -->
@@ -291,8 +302,70 @@
                     <!-- Left: Video Player -->
                     <div class="video-column">
                         <div class="full-video-container">
-                            <video id="fullVideoElement" controls preload="auto"></video>
+                            <video id="fullVideoElement" preload="auto"></video>
                             <div id="videoCaption" class="video-caption"></div>
+                            
+                            <!-- Custom video controls overlay -->
+                            <div class="custom-video-controls">
+                                <button class="video-control-btn skip-back" id="skipBackBtn">
+                                    <span>-15s</span>
+                                </button>
+                                <button class="video-control-btn play-pause" id="playPauseBtn">
+                                    <span id="playPauseIcon">▶</span>
+                                </button>
+                                <button class="video-control-btn skip-forward" id="skipForwardBtn">
+                                    <span>+15s</span>
+                                </button>
+                            </div>
+                            
+                            <!-- Overlay opacity control -->
+                            <div class="opacity-control" id="opacityControl">
+                                <label>
+                                    <input type="range" id="buttonOpacitySlider" min="0" max="100" value="70" step="5">
+                                    <span>Overlay Opacity</span>
+                                </label>
+                            </div>
+                            
+                            <!-- Mobile caption overlay table (Caption Checking Mode) -->
+                            <div id="mobileCaptionOverlay" class="mobile-caption-overlay">
+                                <table class="mobile-caption-table">
+                                    <thead>
+                                        <tr>
+                                            <th>Start</th>
+                                            <th>End</th>
+                                            <th>Text</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="mobileCaptionBody">
+                                        <!-- Will be populated with 4 rows around current time -->
+                                    </tbody>
+                                </table>
+                            </div>
+                            
+                            <!-- Mobile comment input (Video Comments Mode) -->
+                            <div id="mobileCommentInput" class="mobile-comment-input" style="display: none;">
+                                <div class="mobile-comment-header">
+                                    <strong>Add Comment</strong>
+                                    <span id="mobileCommentTimestamp">00:00:00</span>
+                                </div>
+                                <textarea 
+                                    id="mobileCommentText" 
+                                    placeholder="Tap to add comment at current time..." 
+                                    rows="3"></textarea>
+                                <button id="saveMobileCommentBtn" class="btn-save-comment">Save Comment</button>
+                            </div>
+                        </div>
+                        
+                        <!-- Video progress bar with time - separate element below video -->
+                        <div class="video-timeline-wrapper">
+                            <div class="video-timeline-time" id="videoTimelineTime">00:00</div>
+                            <div class="video-progress-bar" id="videoProgressBar">
+                                <div class="video-progress-fill" id="videoProgressFill"></div>
+                                <!-- Comments timeline markers -->
+                                <div id="videoCommentsTimeline" class="video-comments-timeline">
+                                    <!-- Shows comment markers on video timeline -->
+                                </div>
+                            </div>
                         </div>
                         <div class="video-info">
                             <div class="current-timestamp">
