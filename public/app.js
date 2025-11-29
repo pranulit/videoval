@@ -185,8 +185,42 @@ function setupEventListeners() {
     hoverVideoElement = document.getElementById('hoverVideoElement');
     fullVideoElement = document.getElementById('fullVideoElement');
     
-    // Update timestamp display and captions
+    // Configure video element to prevent fullscreen and native controls
     if (fullVideoElement) {
+        fullVideoElement.controls = false;
+        fullVideoElement.setAttribute('playsinline', '');
+        fullVideoElement.setAttribute('webkit-playsinline', '');
+        fullVideoElement.setAttribute('x5-playsinline', '');
+        
+        // Prevent fullscreen on click/tap
+        fullVideoElement.addEventListener('click', (e) => {
+            // Only prevent if clicking directly on video (not on custom controls)
+            if (e.target === fullVideoElement) {
+                e.preventDefault();
+                e.stopPropagation();
+                // Toggle play/pause instead
+                if (fullVideoElement.paused) {
+                    fullVideoElement.play();
+                } else {
+                    fullVideoElement.pause();
+                }
+            }
+        });
+        
+        // Prevent fullscreen events
+        fullVideoElement.addEventListener('webkitbeginfullscreen', (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            return false;
+        });
+        
+        fullVideoElement.addEventListener('fullscreenchange', () => {
+            if (document.fullscreenElement === fullVideoElement) {
+                document.exitFullscreen().catch(() => {});
+            }
+        });
+        
+        // Update timestamp display and captions
         fullVideoElement.addEventListener('timeupdate', updateTimestampDisplay);
     }
     
@@ -1928,6 +1962,27 @@ function setupVideoSection() {
     const fullVideoSection = document.getElementById('fullVideoSection');
     
     if (currentVideoFile) {
+        // Disable native controls and prevent fullscreen
+        if (fullVideoElement) {
+            fullVideoElement.controls = false;
+            fullVideoElement.setAttribute('playsinline', '');
+            fullVideoElement.setAttribute('webkit-playsinline', '');
+            fullVideoElement.setAttribute('x5-playsinline', '');
+            
+            // Prevent fullscreen on mobile
+            fullVideoElement.addEventListener('webkitbeginfullscreen', (e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                return false;
+            });
+            
+            fullVideoElement.addEventListener('fullscreenchange', (e) => {
+                if (document.fullscreenElement === fullVideoElement) {
+                    document.exitFullscreen();
+                }
+            });
+        }
+        
         // Load videos in both players
         hoverVideoElement.src = `/api/videos/${currentVideoFile}`;
         fullVideoElement.src = `/api/videos/${currentVideoFile}`;

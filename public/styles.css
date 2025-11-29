@@ -1242,6 +1242,29 @@ td.hidden-column {
     max-height: 650px;
     display: block;
     object-fit: contain;
+    /* Hide native controls */
+    pointer-events: auto;
+}
+
+/* Hide native video controls on all browsers */
+.full-video-container video::-webkit-media-controls {
+    display: none !important;
+}
+
+.full-video-container video::-webkit-media-controls-enclosure {
+    display: none !important;
+}
+
+.full-video-container video::-webkit-media-controls-panel {
+    display: none !important;
+}
+
+.full-video-container video::-webkit-media-controls-play-button {
+    display: none !important;
+}
+
+.full-video-container video::-webkit-media-controls-start-playback-button {
+    display: none !important;
 }
 
 .video-caption {
@@ -1262,7 +1285,7 @@ td.hidden-column {
     opacity: 0;
     line-height: 1.5;
     box-shadow: none;
-    z-index: 10;
+    z-index: 50; /* Above video but below controls */
     -webkit-text-fill-color: #F7F6F2;
     color: #F7F6F2;
     /* Text shadow will be set dynamically by JavaScript */
@@ -1284,7 +1307,7 @@ td.hidden-column {
     gap: 20px;
     padding: 0 30px;
     pointer-events: none;
-    z-index: 20;
+    z-index: 100; /* Higher z-index to ensure it's above video */
 }
 
 /* Mobile: position above caption table and center */
@@ -1353,7 +1376,7 @@ td.hidden-column {
     padding: 30px 8px 10px 8px; /* More top padding for gradient */
     max-height: 200px;
     overflow-y: auto;
-    z-index: 18;
+    z-index: 90; /* Above video and captions, below controls */
     pointer-events: auto;
 }
 
@@ -1529,7 +1552,7 @@ td.hidden-column {
     background: linear-gradient(to top, rgba(0, 0, 0, 0.95) 0%, rgba(0, 0, 0, 0.90) 40%, rgba(0, 0, 0, 0.75) 80%, transparent 100%);
     backdrop-filter: blur(8px);
     padding: 30px 12px 12px 12px; /* More top padding for gradient */
-    z-index: 18;
+    z-index: 90; /* Above video and captions, below controls */
     flex-direction: column;
     gap: 10px;
 }
@@ -1676,7 +1699,7 @@ td.hidden-column {
     background: rgba(0, 0, 0, 0.75);
     padding: 10px 14px;
     border-radius: 8px;
-    z-index: 30;
+    z-index: 110; /* Highest z-index for opacity control */
     backdrop-filter: blur(4px);
 }
 
@@ -2065,6 +2088,29 @@ tbody tr.selected-row {
         width: 100%;
         height: 100%;
         object-fit: contain;
+        /* Ensure video doesn't trigger fullscreen */
+        pointer-events: auto;
+    }
+    
+    /* Prevent native controls from appearing on mobile */
+    .full-video-container video::-webkit-media-controls {
+        display: none !important;
+    }
+    
+    .full-video-container video::-webkit-media-controls-enclosure {
+        display: none !important;
+    }
+    
+    .full-video-container video::-webkit-media-controls-panel {
+        display: none !important;
+    }
+    
+    .full-video-container video::-webkit-media-controls-play-button {
+        display: none !important;
+    }
+    
+    .full-video-container video::-webkit-media-controls-start-playback-button {
+        display: none !important;
     }
 
     /* Timeline matches video width on mobile */
