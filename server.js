@@ -44,22 +44,32 @@ if (NODE_ENV === 'production') {
 
 // Helper function to extract group key from filename (first 4 tokens)
 function extractGroupKey(filename) {
+  if (!filename || typeof filename !== 'string') {
+    return 'ungrouped';
+  }
   // Remove extension
-  const nameWithoutExt = filename.replace(/\.(csv|mp4|webm|mov|avi)$/i, '');
+  const nameWithoutExt = filename.replace(/\.(csv|mp4|webm|mov|avi|srt)$/i, '');
   // Split by underscore and take first 4 tokens
   const tokens = nameWithoutExt.split('_');
   // Take first 4 tokens (e.g., LT0023_B251103_Person1+NL_677)
-  return tokens.slice(0, 4).join('_');
+  return tokens.slice(0, 4).join('_') || 'ungrouped';
 }
 
 // Helper function to normalize filename for matching
 function normalizeFilename(filename) {
+  if (!filename || typeof filename !== 'string') {
+    return '';
+  }
   return filename.replace(/\.(csv|srt|mp4|webm|mov|avi)$/i, '').replace(/_split$/i, '');
 }
 
 // Helper function to extract base name and version from filename
 // Example: LT0023_B251106_Person13+NL_689_v001 -> base: LT0023_B251106_Person13+NL_689, version: v001
 function extractBaseNameAndVersion(filename) {
+  if (!filename || typeof filename !== 'string') {
+    return { baseName: '', version: null };
+  }
+  
   const nameWithoutExt = filename.replace(/\.(csv|srt|mp4|webm|mov|avi)$/i, '');
   
   // Match version pattern: _v001, _v0001, _v1, etc. at the end
@@ -101,10 +111,16 @@ function findFileByBaseName(baseName, folderId = null) {
 }
 
 function isCaptionFile(filename) {
+  if (!filename || typeof filename !== 'string') {
+    return false;
+  }
   return CAPTION_EXTENSIONS.includes(path.extname(filename).toLowerCase());
 }
 
 function isVideoFile(filename) {
+  if (!filename || typeof filename !== 'string') {
+    return false;
+  }
   return VIDEO_EXTENSIONS.includes(path.extname(filename).toLowerCase());
 }
 
@@ -478,10 +494,23 @@ app.post('/api/upload-bulk', requireAdmin, uploadLimiter, uploadBulk.array('file
     console.log('Bulk upload received:', uploadedFiles.length, 'files');
     
     // Separate caption and video files
-    const captionFiles = uploadedFiles.filter(f => isCaptionFile(f.originalname));
-    const videoFiles = uploadedFiles.filter(f => isVideoFile(f.originalname));
+    // Filter out files without valid originalname first
+    const validFiles = uploadedFiles.filter(f => f && f.originalname && typeof f.originalname === 'string');
+    const captionFiles = validFiles.filter(f => isCaptionFile(f.originalname));
+    const videoFiles = validFiles.filter(f => isVideoFile(f.originalname));
     
     console.log('Caption files:', captionFiles.length, 'Videos:', videoFiles.length);
+    
+    // Report any invalid files
+    const invalidFiles = uploadedFiles.filter(f => !f || !f.originalname || typeof f.originalname !== 'string');
+    if (invalidFiles.length > 0) {
+      console.warn('Invalid files detected (missing filename):', invalidFiles.length);
+      results.errors.push({
+        file: 'unknown',
+        error: `${invalidFiles.length} file(s) missing filename information`,
+        type: 'validation'
+      });
+    }
     
     const results = {
       created: [],
