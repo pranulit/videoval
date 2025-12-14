@@ -126,78 +126,122 @@ function secondsToTimestamp(seconds) {
 }
 
 function parseSrtContent(content) {
-  const normalized = content.replace(/\r/g, '').trim();
+  if (!content || typeof content !== 'string') {
+    throw new Error('SRT content is empty or invalid');
+  }
+  
+  // Normalize line endings: handle \r\n, \r, and \n
+  const normalized = content.replace(/\r\n/g, '\n').replace(/\r/g, '\n').trim();
   if (!normalized) {
     return [];
   }
 
+  // Split by double newlines (subtitle blocks)
   const blocks = normalized.split(/\n\n+/);
   const records = [];
 
-  blocks.forEach((block) => {
-    const lines = block.split('\n').map(line => line.trim()).filter(Boolean);
-    if (lines.length < 2) {
-      return;
-    }
+  blocks.forEach((block, blockIndex) => {
+    try {
+      const lines = block.split('\n').map(line => line.trim()).filter(Boolean);
+      if (lines.length < 2) {
+        // Skip empty or invalid blocks
+        return;
+      }
 
-    let lineIndex = 0;
-    let segmentLabel = lines[lineIndex];
-    if (/^\d+$/.test(segmentLabel)) {
+      let lineIndex = 0;
+      let segmentLabel = lines[lineIndex];
+      
+      // Check if first line is a number (subtitle index)
+      if (/^\d+$/.test(segmentLabel)) {
+        lineIndex += 1;
+      } else {
+        // If not a number, use block index as segment label
+        segmentLabel = (records.length + 1).toString();
+      }
+
+      if (lineIndex >= lines.length) {
+        return;
+      }
+
+      const timingLine = lines[lineIndex];
       lineIndex += 1;
-    } else {
-      segmentLabel = (records.length + 1).toString();
+      
+      // Match timing format: HH:MM:SS,mmm --> HH:MM:SS,mmm or HH:MM:SS.mmm --> HH:MM:SS.mmm
+      const timingMatch = timingLine.match(/(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,\.]\d{3})/);
+      if (!timingMatch) {
+        // Skip blocks without valid timing
+        console.warn(`Skipping SRT block ${blockIndex + 1}: invalid timing line "${timingLine}"`);
+        return;
+      }
+
+      const startSeconds = parseTimestampToSeconds(timingMatch[1]);
+      const endSeconds = parseTimestampToSeconds(timingMatch[2]);
+      
+      // Validate timing
+      if (isNaN(startSeconds) || isNaN(endSeconds) || endSeconds < startSeconds) {
+        console.warn(`Skipping SRT block ${blockIndex + 1}: invalid timing values`);
+        return;
+      }
+      
+      const duration = Math.max(0, endSeconds - startSeconds);
+      let text = lines.slice(lineIndex).join(' ').trim();
+
+      // Skip if no text content
+      if (!text) {
+        return;
+      }
+
+      // Strip any existing <font> tags or other simple HTML formatting
+      text = text.replace(/<\/?font[^>]*>/gi, '');
+
+      records.push({
+        segment: segmentLabel,
+        start_seconds: startSeconds.toFixed(3),
+        end_seconds: endSeconds.toFixed(3),
+        duration: duration.toFixed(3),
+        start_time: secondsToTimestamp(startSeconds),
+        end_time: secondsToTimestamp(endSeconds),
+        text
+      });
+    } catch (blockError) {
+      // Log but continue processing other blocks
+      console.warn(`Error processing SRT block ${blockIndex + 1}:`, blockError.message);
     }
-
-    if (lineIndex >= lines.length) {
-      return;
-    }
-
-    const timingLine = lines[lineIndex];
-    lineIndex += 1;
-    const timingMatch = timingLine.match(/(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,\.]\d{3})/);
-    if (!timingMatch) {
-      return;
-    }
-
-    const startSeconds = parseTimestampToSeconds(timingMatch[1]);
-    const endSeconds = parseTimestampToSeconds(timingMatch[2]);
-    const duration = Math.max(0, endSeconds - startSeconds);
-    let text = lines.slice(lineIndex).join(' ').trim();
-
-    // Strip any existing <font> tags or other simple HTML formatting
-    text = text.replace(/<\/?font[^>]*>/gi, '');
-
-    records.push({
-      segment: segmentLabel,
-      start_seconds: startSeconds.toFixed(3),
-      end_seconds: endSeconds.toFixed(3),
-      duration: duration.toFixed(3),
-      start_time: secondsToTimestamp(startSeconds),
-      end_time: secondsToTimestamp(endSeconds),
-      text
-    });
   });
 
   return records;
 }
 
 function parseCaptionFile(filePath, originalName) {
-  const fileContent = fs.readFileSync(filePath, 'utf-8');
-  const ext = path.extname(originalName).toLowerCase();
-
-  if (ext === '.srt') {
-    const records = parseSrtContent(fileContent);
-    if (!records.length) {
-      throw new Error('SRT file is empty or invalid');
+  try {
+    // Try reading with UTF-8 first, fallback to latin1 if needed
+    let fileContent;
+    try {
+      fileContent = fs.readFileSync(filePath, 'utf-8');
+    } catch (readError) {
+      // Fallback to latin1 encoding if UTF-8 fails
+      fileContent = fs.readFileSync(filePath, 'latin1');
     }
-    return records;
-  }
+    
+    const ext = path.extname(originalName).toLowerCase();
 
-  return parse(fileContent, {
-    columns: true,
-    skip_empty_lines: true,
-    trim: true
-  });
+    if (ext === '.srt') {
+      const records = parseSrtContent(fileContent);
+      if (!records.length) {
+        throw new Error(`SRT file "${originalName}" is empty or invalid - no subtitle blocks found`);
+      }
+      return records;
+    }
+
+    return parse(fileContent, {
+      columns: true,
+      skip_empty_lines: true,
+      trim: true
+    });
+  } catch (error) {
+    // Re-throw with more context
+    throw new Error(`Failed to parse ${originalName}: ${error.message}`);
+  }
 }
 
 // Helper function to generate video thumbnail
@@ -497,6 +541,11 @@ app.post('/api/upload-bulk', requireAdmin, uploadLimiter, uploadBulk.array('file
     
     for (const captionFile of captionFiles) {
       try {
+        // Validate file exists before processing
+        if (!fs.existsSync(captionFile.path)) {
+          throw new Error(`File not found: ${captionFile.originalname}`);
+        }
+        
         const records = parseCaptionFile(captionFile.path, captionFile.originalname);
         const { baseName, version } = extractBaseNameAndVersion(captionFile.originalname);
         const captionNormalized = normalizeFilename(captionFile.originalname);
@@ -621,13 +670,19 @@ app.post('/api/upload-bulk', requireAdmin, uploadLimiter, uploadBulk.array('file
         
       } catch (error) {
         console.error('Error processing caption file:', captionFile.originalname, error);
+        console.error('Error stack:', error.stack);
         results.errors.push({
           file: captionFile.originalname,
-          error: error.message
+          error: error.message,
+          type: 'caption'
         });
         // Clean up on error
         if (fs.existsSync(captionFile.path)) {
-          fs.unlinkSync(captionFile.path);
+          try {
+            fs.unlinkSync(captionFile.path);
+          } catch (unlinkError) {
+            console.error('Failed to clean up file:', captionFile.path, unlinkError);
+          }
         }
       }
     }
@@ -789,11 +844,30 @@ app.use((err, req, res, next) => {
 // Get all folders
 app.get('/api/folders', (req, res) => {
   try {
-    const folders = JSON.parse(fs.readFileSync(foldersFile, 'utf-8'));
+    // Check both locations for backward compatibility
+    let foldersContent;
+    if (fs.existsSync(foldersFile)) {
+      foldersContent = fs.readFileSync(foldersFile, 'utf-8');
+    } else if (fs.existsSync(foldersFileOld)) {
+      // Migrate old file
+      foldersContent = fs.readFileSync(foldersFileOld, 'utf-8');
+      try {
+        fs.writeFileSync(foldersFile, foldersContent);
+        console.log('Migrated folders.json to data directory');
+      } catch (migrateError) {
+        console.error('Failed to migrate folders.json:', migrateError);
+      }
+    } else {
+      // Create empty file if neither exists
+      foldersContent = JSON.stringify([]);
+      fs.writeFileSync(foldersFile, foldersContent);
+    }
+    
+    const folders = JSON.parse(foldersContent);
     res.json(folders);
   } catch (error) {
     console.error('Error listing folders:', error);
-    res.status(500).json({ error: 'Failed to list folders' });
+    res.status(500).json({ error: 'Failed to list folders', details: error.message });
   }
 });
 
@@ -844,27 +918,42 @@ app.get('/api/files', (req, res) => {
     const grouped = req.query.grouped === 'true';
     
     const files = fs.readdirSync(dataDir)
-      .filter(f => f.endsWith('.json'))
+      .filter(f => f.endsWith('.json') && f !== 'folders.json') // Exclude folders.json
       .map(f => {
-        const content = JSON.parse(fs.readFileSync(path.join(dataDir, f), 'utf-8'));
-        const { baseName, version } = extractBaseNameAndVersion(content.originalName);
-        return {
-          id: content.id,
-          name: content.originalName,
-          baseName: baseName,
-          version: version,
-          uploadDate: content.uploadDate,
-          rowCount: content.data ? content.data.length : 0,
-          completed: content.completed || false,
-          folderId: content.folderId || null,
-          groupKey: content.groupKey || null,
-          hasVideo: !!content.videoFile,
-          thumbnailFile: content.thumbnailFile || null,
-          commentCount: (content.videoComments || []).length,
-          versionCount: content.versions ? content.versions.length : 0,
-          isStacked: !!(content.versions && content.versions.length > 0)
-        };
+        try {
+          const filePath = path.join(dataDir, f);
+          const fileContent = fs.readFileSync(filePath, 'utf-8');
+          const content = JSON.parse(fileContent);
+          
+          // Validate required fields
+          if (!content.id || !content.originalName) {
+            console.warn(`Skipping invalid file ${f}: missing required fields`);
+            return null;
+          }
+          
+          const { baseName, version } = extractBaseNameAndVersion(content.originalName);
+          return {
+            id: content.id,
+            name: content.originalName,
+            baseName: baseName,
+            version: version,
+            uploadDate: content.uploadDate,
+            rowCount: content.data ? content.data.length : 0,
+            completed: content.completed || false,
+            folderId: content.folderId || null,
+            groupKey: content.groupKey || null,
+            hasVideo: !!content.videoFile,
+            thumbnailFile: content.thumbnailFile || null,
+            commentCount: (content.videoComments || []).length,
+            versionCount: content.versions ? content.versions.length : 0,
+            isStacked: !!(content.versions && content.versions.length > 0)
+          };
+        } catch (fileError) {
+          console.error(`Error reading file ${f}:`, fileError.message);
+          return null; // Skip corrupted files
+        }
       })
+      .filter(file => file !== null) // Remove null entries
       .filter(file => !folderId || file.folderId === folderId)
       .sort((a, b) => new Date(b.uploadDate) - new Date(a.uploadDate));
     
