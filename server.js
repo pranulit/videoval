@@ -36,6 +36,12 @@ if (process.env.FFMPEG_PATH) {
   ffmpeg.setFfmpegPath(process.env.FFMPEG_PATH);
 }
 
+// Trust proxy - MUST be set before initializing rate limiters
+// Railway uses proxies, so we need to trust the proxy to get real client IPs
+if (NODE_ENV === 'production') {
+  app.set('trust proxy', true); // Trust all proxies for Railway
+}
+
 // Helper function to extract group key from filename (first 4 tokens)
 function extractGroupKey(filename) {
   // Remove extension
@@ -213,13 +219,17 @@ function generateThumbnail(videoPath, outputPath) {
 }
 
 // Create necessary directories
+// Note: In production (Railway), these should be mounted as volumes for data persistence
 const uploadDir = path.join(__dirname, 'uploads');
 const dataDir = path.join(__dirname, 'data');
 const thumbnailDir = path.join(__dirname, 'uploads', 'thumbnails');
-const foldersFile = path.join(__dirname, 'folders.json');
-if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir);
-if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir);
-if (!fs.existsSync(thumbnailDir)) fs.mkdirSync(thumbnailDir);
+// Move folders.json to data directory so it persists in the volume
+const foldersFile = path.join(__dirname, 'data', 'folders.json');
+
+// Ensure directories exist (use recursive: true for volume compatibility)
+if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
+if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+if (!fs.existsSync(thumbnailDir)) fs.mkdirSync(thumbnailDir, { recursive: true });
 if (!fs.existsSync(foldersFile)) fs.writeFileSync(foldersFile, JSON.stringify([]));
 
 // Configure multer for CSV uploads
@@ -280,22 +290,22 @@ const uploadBulk = multer({
 });
 
 // Rate limiting to prevent abuse
+// Higher limits for production since multiple users may share same network
 const limiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 100, // Limit each IP to 100 requests per windowMs
-  message: 'Too many requests from this IP, please try again later.'
+  max: 500, // Increased from 100 to accommodate multiple users
+  message: 'Too many requests from this IP, please try again later.',
+  standardHeaders: true, // Return rate limit info in the `RateLimit-*` headers
+  legacyHeaders: false, // Disable the `X-RateLimit-*` headers
 });
 
 const uploadLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
-  max: 50, // Limit uploads
-  message: 'Too many uploads from this IP, please try again later.'
+  max: 100, // Increased from 50
+  message: 'Too many uploads from this IP, please try again later.',
+  standardHeaders: true,
+  legacyHeaders: false,
 });
-
-// Trust proxy for Cloudflare (must be before session middleware)
-if (NODE_ENV === 'production') {
-  app.set('trust proxy', 1);
-}
 
 // Middleware
 app.use(limiter);
