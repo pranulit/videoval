@@ -224,13 +224,31 @@ const uploadDir = path.join(__dirname, 'uploads');
 const dataDir = path.join(__dirname, 'data');
 const thumbnailDir = path.join(__dirname, 'uploads', 'thumbnails');
 // Move folders.json to data directory so it persists in the volume
+// But maintain backward compatibility with old location
+const foldersFileOld = path.join(__dirname, 'folders.json');
 const foldersFile = path.join(__dirname, 'data', 'folders.json');
 
 // Ensure directories exist (use recursive: true for volume compatibility)
 if (!fs.existsSync(uploadDir)) fs.mkdirSync(uploadDir, { recursive: true });
 if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
 if (!fs.existsSync(thumbnailDir)) fs.mkdirSync(thumbnailDir, { recursive: true });
-if (!fs.existsSync(foldersFile)) fs.writeFileSync(foldersFile, JSON.stringify([]));
+
+// Migrate folders.json from old location to new location if needed
+if (fs.existsSync(foldersFileOld) && !fs.existsSync(foldersFile)) {
+  try {
+    // Copy old file to new location
+    const oldContent = fs.readFileSync(foldersFileOld, 'utf-8');
+    fs.writeFileSync(foldersFile, oldContent);
+    console.log('Migrated folders.json to data directory');
+  } catch (error) {
+    console.error('Error migrating folders.json:', error);
+    // Create empty file if migration fails
+    fs.writeFileSync(foldersFile, JSON.stringify([]));
+  }
+} else if (!fs.existsSync(foldersFile)) {
+  // Create new file if it doesn't exist in either location
+  fs.writeFileSync(foldersFile, JSON.stringify([]));
+}
 
 // Configure multer for CSV uploads
 const csvStorage = multer.diskStorage({
@@ -745,6 +763,7 @@ app.post('/api/upload-bulk', requireAdmin, uploadLimiter, uploadBulk.array('file
     res.status(500).json({ 
       error: 'Failed to process bulk upload', 
       details: error.message,
+      message: error.message, // Include message for easier debugging
       stack: process.env.NODE_ENV === 'development' ? error.stack : undefined 
     });
   }
