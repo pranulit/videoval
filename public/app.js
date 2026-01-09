@@ -18,6 +18,7 @@ let videoComments = [];
 let uploadMode = 'bulk'; // 'bulk' or 'single'
 let selectedFiles = new Set(); // For bulk delete
 let saveTimeout = null; // For debouncing save function
+let uploadAbortController = null; // For cancelling uploads
 const videoExtensions = ['.mp4', '.webm', '.mov', '.avi'];
 let allowSrtCaptions = false;
 
@@ -884,9 +885,14 @@ async function handleUpload(e) {
         
         try {
             console.log('Sending bulk upload request...');
+            
+            // Create abort controller for cancellation
+            uploadAbortController = new AbortController();
+            
             const response = await fetch('/api/upload-bulk', {
                 method: 'POST',
-                body: formData
+                body: formData,
+                signal: uploadAbortController.signal
             });
             
             console.log('Response status:', response.status);
@@ -983,8 +989,15 @@ async function handleUpload(e) {
             }
         } catch (error) {
             console.error('Upload exception:', error);
-            progressText.textContent = `Error: ${error.message}`;
+            if (error.name === 'AbortError') {
+                progressText.textContent = 'Upload cancelled';
+                showNotification('Upload cancelled', 'info');
+            } else {
+                progressText.textContent = `Error: ${error.message}`;
+            }
             submitBtn.disabled = false;
+        } finally {
+            uploadAbortController = null;
         }
     } else {
         // Single mode: upload caption file first, then attach video
@@ -1019,9 +1032,13 @@ async function handleUpload(e) {
         }
         
         try {
+            // Create abort controller for cancellation
+            uploadAbortController = new AbortController();
+            
             const captionResponse = await fetch('/api/upload', {
                 method: 'POST',
-                body: captionFormData
+                body: captionFormData,
+                signal: uploadAbortController.signal
             });
             
             if (captionResponse.ok) {
@@ -1037,7 +1054,8 @@ async function handleUpload(e) {
                 
                 const videoResponse = await fetch(`/api/files/${fileId}/upload-video`, {
                     method: 'POST',
-                    body: videoFormData
+                    body: videoFormData,
+                    signal: uploadAbortController.signal
                 });
                 
                 if (videoResponse.ok) {
@@ -1067,9 +1085,24 @@ async function handleUpload(e) {
                 submitBtn.disabled = false;
             }
         } catch (error) {
-            progressText.textContent = `Error: ${error.message}`;
+            if (error.name === 'AbortError') {
+                progressText.textContent = 'Upload cancelled';
+                showNotification('Upload cancelled', 'info');
+            } else {
+                progressText.textContent = `Error: ${error.message}`;
+            }
             submitBtn.disabled = false;
+        } finally {
+            uploadAbortController = null;
         }
+    }
+}
+
+// Cancel upload function
+function cancelUpload() {
+    if (uploadAbortController) {
+        uploadAbortController.abort();
+        console.log('Upload cancelled by user');
     }
 }
 
