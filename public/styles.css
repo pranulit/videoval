@@ -1,3 +1,16 @@
+.explorer-content {
+    display: block;
+}
+.explorer-content.collapsed {
+    display: none;
+}
+.explorer-header .toggle-icon {
+    display: inline-block;
+    transition: transform 0.2s ease;
+}
+.explorer-header.collapsed .toggle-icon {
+    transform: rotate(-90deg);
+}
 @font-face {
     font-family: 'ABC Diatype';
     src: url('../font/abc-diatype-regular.otf') format('opentype');
@@ -11,11 +24,21 @@
     box-sizing: border-box;
 }
 
+html {
+    overflow-x: hidden;
+    width: 100%;
+    max-width: 100vw;
+}
+
 body {
     font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
     background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
     min-height: 100vh;
     padding: 20px;
+    overflow-x: hidden;
+    width: 100%;
+    max-width: 100vw;
+    position: relative;
 }
 
 .container {
@@ -25,6 +48,9 @@ body {
     border-radius: 12px;
     box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
     overflow: hidden;
+    width: 100%;
+    max-width: 100%;
+    position: relative;
 }
 
 header {
@@ -302,6 +328,9 @@ header h1 {
     border: 2px solid #e5e7eb;
     border-radius: 8px;
     overflow: hidden;
+    width: 100%;
+    max-width: 100%;
+    box-sizing: border-box;
 }
 
 .explorer-header {
@@ -1234,6 +1263,8 @@ td.hidden-column {
     align-items: center;
     justify-content: center;
     max-height: 650px; /* Match subtitle panel height on desktop */
+    /* Ensure all child overlays are contained */
+    isolation: isolate;
 }
 
 .full-video-container video {
@@ -1281,13 +1312,15 @@ td.hidden-column {
     font-weight: normal;
     text-align: center;
     max-width: 80%;
+    width: auto;
     pointer-events: none;
     opacity: 0;
     line-height: 1.5;
     box-shadow: none;
-    z-index: 50; /* Above video but below controls */
+    z-index: 50; /* Lowest overlay - above video but below all other overlays */
     -webkit-text-fill-color: #F7F6F2;
     color: #F7F6F2;
+    box-sizing: border-box;
     /* Text shadow will be set dynamically by JavaScript */
 }
 
@@ -1307,7 +1340,10 @@ td.hidden-column {
     gap: 20px;
     padding: 0 30px;
     pointer-events: none;
-    z-index: 100; /* Higher z-index to ensure it's above video */
+    z-index: 100; /* Above caption overlay (90), comment input (95), but below opacity control (110) */
+    box-sizing: border-box;
+    width: 100%;
+    max-width: 100%;
 }
 
 /* Mobile: position above caption table and center */
@@ -1376,8 +1412,10 @@ td.hidden-column {
     padding: 30px 8px 10px 8px; /* More top padding for gradient */
     max-height: 200px;
     overflow-y: auto;
-    z-index: 90; /* Above video and captions, below controls */
+    overflow-x: hidden;
+    z-index: 90; /* Above video (50) and captions (50), below comment input (95) and controls (100) */
     pointer-events: auto;
+    box-sizing: border-box;
 }
 
 .mobile-caption-table {
@@ -1472,10 +1510,12 @@ td.hidden-column {
 /* Mobile: timeline matches video width */
 @media (max-width: 768px) {
     .video-timeline-wrapper {
-        width: calc(100vw * (9/16)); /* Match 9:16 video width */
+        width: min(100%, calc(100vw * (9/16))); /* Match 9:16 video width, but don't exceed container */
         max-width: 100%;
         margin-left: auto;
         margin-right: auto;
+        box-sizing: border-box;
+        overflow-x: hidden;
     }
     
     .video-timeline-time {
@@ -1552,9 +1592,12 @@ td.hidden-column {
     background: linear-gradient(to top, rgba(0, 0, 0, 0.95) 0%, rgba(0, 0, 0, 0.90) 40%, rgba(0, 0, 0, 0.75) 80%, transparent 100%);
     backdrop-filter: blur(8px);
     padding: 30px 12px 12px 12px; /* More top padding for gradient */
-    z-index: 90; /* Above video and captions, below controls */
+    z-index: 95; /* Above caption overlay (90) but below controls (100) */
     flex-direction: column;
     gap: 10px;
+    pointer-events: auto;
+    overflow-x: hidden;
+    box-sizing: border-box;
 }
 
 .mobile-comment-header {
@@ -1699,8 +1742,11 @@ td.hidden-column {
     background: rgba(0, 0, 0, 0.75);
     padding: 10px 14px;
     border-radius: 8px;
-    z-index: 110; /* Highest z-index for opacity control */
+    z-index: 110; /* Highest z-index - always on top of everything */
     backdrop-filter: blur(4px);
+    pointer-events: auto;
+    box-sizing: border-box;
+    max-width: calc(100% - 20px);
 }
 
 .opacity-control label {
@@ -1725,11 +1771,32 @@ td.hidden-column {
         left: 50%;
         transform: translateX(-50%);
         width: 85%;
-        max-width: 320px;
+        max-width: min(320px, calc(100% - 20px));
         background: rgba(36, 40, 72, 0.92);
         padding: 10px 16px;
         border-radius: 12px;
         box-shadow: 0 8px 24px rgba(0, 0, 0, 0.25);
+        box-sizing: border-box;
+        pointer-events: auto;
+        z-index: 110; /* Ensure it stays on top */
+    }
+    
+    /* Ensure all overlays respect container boundaries on mobile */
+    .full-video-container > * {
+        max-width: 100%;
+        box-sizing: border-box;
+    }
+    
+    /* Prevent any overlay from causing horizontal scroll */
+    .mobile-caption-overlay,
+    .mobile-comment-input,
+    .custom-video-controls,
+    .opacity-control,
+    .video-caption {
+        overflow-x: hidden;
+        max-width: 100%;
+        left: 0;
+        right: 0;
     }
     
     .opacity-control label {
@@ -2042,6 +2109,197 @@ tbody tr.selected-row {
     .editor-section {
         padding: 0;
     }
+    
+    /* File Card Mobile Layout */
+    .file-card {
+        flex-direction: column;
+        align-items: flex-start;
+        padding: 12px;
+        gap: 12px;
+        width: 100%;
+        max-width: 100%;
+        box-sizing: border-box;
+        overflow: hidden;
+    }
+    
+    .file-card-content {
+        width: 100%;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+    }
+    
+    .file-card-left {
+        width: 100%;
+        flex-direction: row;
+        align-items: flex-start;
+        gap: 12px;
+        min-width: 0;
+        flex: 1;
+    }
+    
+    .file-thumbnail {
+        width: 80px;
+        height: 60px;
+        flex-shrink: 0;
+    }
+    
+    .file-card-title {
+        flex: 1;
+        min-width: 0;
+        width: auto;
+        max-width: calc(100% - 116px); /* 80px thumbnail + 12px gap + 24px badge */
+        display: flex;
+        flex-direction: column;
+    }
+    
+    .completion-badge {
+        flex-shrink: 0;
+        width: 24px;
+        height: 24px;
+        font-size: 12px;
+    }
+    
+    .file-card h3 {
+        font-size: 13px;
+        word-break: break-word;
+        overflow-wrap: break-word;
+        white-space: normal;
+        line-height: 1.3;
+        margin-bottom: 4px;
+        width: 100%;
+        display: block;
+        writing-mode: horizontal-tb; /* Ensure horizontal text */
+        text-orientation: mixed;
+    }
+    
+    .file-name-with-badges {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 6px;
+        width: 100%;
+        min-width: 0;
+        display: flex;
+    }
+    
+    .file-name-with-badges h3 {
+        width: 100%;
+        min-width: 0;
+        display: block;
+        writing-mode: horizontal-tb;
+        text-orientation: mixed;
+    }
+    
+    .file-badges {
+        gap: 4px;
+        flex-wrap: wrap;
+    }
+    
+    .file-card-right {
+        width: 100%;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 8px;
+        padding-top: 8px;
+        border-top: 1px solid #e5e7eb;
+    }
+    
+    .file-card .file-info {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 4px;
+        width: 100%;
+    }
+    
+    .file-card .file-info span {
+        white-space: normal;
+        font-size: 11px;
+    }
+    
+    .file-card .file-actions {
+        width: 100%;
+        justify-content: flex-start;
+        margin-top: 0;
+    }
+    
+    .file-select-checkbox {
+        position: absolute;
+        top: 8px;
+        right: 8px;
+        left: auto;
+        z-index: 10;
+    }
+    
+    
+    /* Bulk Actions Bar Mobile */
+    .bulk-actions-bar {
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 12px;
+        padding: 12px;
+    }
+    
+    .select-all-label {
+        width: 100%;
+    }
+    
+    #selectedCountDisplay {
+        margin-left: 0;
+        margin-top: 4px;
+    }
+    
+    /* Folder Controls Mobile */
+    .folder-controls {
+        flex-direction: column;
+        gap: 10px;
+    }
+    
+    .explorer-header {
+        padding: 12px;
+        font-size: 14px;
+    }
+    
+    .file-grid {
+        gap: 12px;
+        padding: 8px;
+        width: 100%;
+        max-width: 100%;
+        box-sizing: border-box;
+        overflow-x: hidden;
+    }
+    
+    .explorer-content {
+        overflow-x: hidden;
+        width: 100%;
+        max-width: 100%;
+    }
+    
+    /* Container padding */
+    .container {
+        padding: 10px;
+    }
+    
+    html {
+        overflow-x: hidden;
+        width: 100%;
+        max-width: 100vw;
+    }
+    
+    body {
+        padding: 10px;
+        overflow-x: hidden;
+        width: 100%;
+        max-width: 100vw;
+        position: relative;
+    }
+    
+    .container {
+        width: 100%;
+        max-width: 100%;
+        margin: 0;
+        border-radius: 0;
+        overflow-x: hidden;
+    }
 
     .editor-header {
         padding: 12px;
@@ -2067,14 +2325,16 @@ tbody tr.selected-row {
         justify-content: center;
         align-items: center;
         width: min(100%, calc((100vh - 180px) * (9 / 16)));
+        max-width: 100%;
         margin: 0 auto;
         gap: 0;
+        box-sizing: border-box;
     }
 
     .full-video-container {
         height: calc(100vh - 180px); /* Full viewport height minus header */
         width: 100% !important;
-        max-width: calc((100vh - 180px) * (9 / 16));
+        max-width: min(100%, calc((100vh - 180px) * (9 / 16)));
         position: relative;
         background: black;
         aspect-ratio: 9 / 16;
@@ -2082,6 +2342,10 @@ tbody tr.selected-row {
         align-items: center;
         justify-content: center;
         border-radius: 0;
+        box-sizing: border-box;
+        overflow: hidden; /* Prevent any overlay from overflowing */
+        /* Ensure all child overlays are contained */
+        isolation: isolate;
     }
 
     .full-video-container video {
@@ -2116,10 +2380,11 @@ tbody tr.selected-row {
     /* Timeline matches video width on mobile */
     .video-timeline-wrapper {
         width: 100%;
-        max-width: calc((100vh - 180px) * (9 / 16));
+        max-width: min(100%, calc((100vh - 180px) * (9 / 16)));
         margin: 10px auto 0 auto;
         display: flex;
         gap: 8px;
+        box-sizing: border-box;
     }
 
     .video-timeline-time {
@@ -2212,6 +2477,43 @@ tbody tr.selected-row {
     .modal-content {
         min-width: auto;
         width: 90%;
+        padding: 20px;
+        max-width: 95%;
+    }
+    
+    header h1 {
+        font-size: 24px;
+    }
+    
+    .header-actions {
+        flex-direction: column;
+        width: 100%;
+        gap: 10px;
+    }
+    
+    .header-actions .btn {
+        width: 100%;
+    }
+    
+    .explorer-section {
+        margin-bottom: 12px;
+        width: 100%;
+        max-width: 100%;
+        overflow-x: hidden;
+        box-sizing: border-box;
+    }
+    
+    .explorer-header {
+        padding: 10px 12px;
+        font-size: 14px;
+        width: 100%;
+        max-width: 100%;
+        box-sizing: border-box;
+    }
+    
+    .file-count-badge {
+        font-size: 11px;
+        padding: 2px 6px;
     }
 
     .btn-header-toggle {

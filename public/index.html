@@ -241,7 +241,23 @@
                         <h2 id="currentFileName">File Name</h2>
                         <div class="header-primary-actions">
                             <button id="videoModeBtn" class="btn-header-action btn-mode">Table Mode</button>
+                            <button type="button" id="autoScrollBtn" class="btn-header-action btn-secondary">
+                                Auto-scroll: Off
+                            </button>
+                            <button type="button" id="loopVideoBtn" class="btn-header-action btn-secondary">
+                                Loop: Off (Table mode)
+                            </button>
+                            <button type="button" id="translationToggleBtn" class="btn-header-action btn-secondary">
+                                Translations: Off
+                            </button>
+                            <div class="nav-buttons">
+                                <button type="button" id="prevFileBtn" class="btn-header-action btn-secondary">← Prev</button>
+                                <button type="button" id="nextFileBtn" class="btn-header-action btn-secondary">Next →</button>
+                            </div>
                             <button id="saveBtn" class="btn-header-action btn-save">Save Changes</button>
+                            <button type="button" id="downloadTranslatedBtn" class="btn-header-action btn-secondary" disabled>
+                                Download Translated SRT
+                            </button>
                             <button type="button" id="closeEditorBtn" class="btn-header-action btn-close">Close</button>
                         </div>
                     </div>
@@ -380,13 +396,6 @@
                                     <input type="checkbox" id="showCaptionsToggle" checked>
                                     <strong>Show Captions on Video</strong>
                                 </label>
-                                <label>
-                                    <input type="checkbox" id="splitCaptionsToggle">
-                                    <strong>Split Captions (20 chars max)</strong>
-                                </label>
-                                <button id="downloadSplitCaptionsBtn" class="btn btn-sm btn-primary" style="display: none;">
-                                    Download Split Captions
-                                </button>
                             </div>
                         </div>
                     </div>

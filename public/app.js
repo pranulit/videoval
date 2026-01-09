@@ -1,7 +1,6 @@
 // Global state
 let currentFileId = null;
 let currentData = [];
-let splitCaptions = []; // Store split captions separately
 let isAdmin = false;
 let isCompleted = false;
 let columnVisibility = {};
@@ -13,6 +12,9 @@ let videoMode = 'hover'; // 'hover' or 'full'
 let selectedRowIndex = null;
 let folders = [];
 let selectedFolder = null;
+let cachedFiles = []; // cache of all files returned from loadFiles
+let currentFileList = []; // ordered list for navigation
+let currentFileIndex = -1; // position within currentFileList
 let fileToMove = null;
 let videoComments = [];
 let uploadMode = 'bulk'; // 'bulk' or 'single'
@@ -21,6 +23,13 @@ let saveTimeout = null; // For debouncing save function
 let uploadAbortController = null; // For cancelling uploads
 const videoExtensions = ['.mp4', '.webm', '.mov', '.avi'];
 let allowSrtCaptions = false;
+let autoScrollCaptions = false; // default off
+let isEditingCaption = false; // block jumps while editing
+let loopVideoPlayback = false; // default off
+let translationEnabled = false;
+let translatedFileId = null;
+let translatedData = null;
+let originalData = [];
 
 function isVideoFileName(name) {
     const lower = name.toLowerCase();
@@ -98,7 +107,7 @@ function handleSrtToggleChange(e) {
 }
 
 // Initialize
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
     // Check if viewing a specific folder from URL
     const urlPath = window.location.pathname;
     const folderMatch = urlPath.match(/\/folder\/(\d+)/);
@@ -113,7 +122,8 @@ document.addEventListener('DOMContentLoaded', () => {
     if (editorSection) editorSection.style.display = 'none';
     if (fullVideoSection) fullVideoSection.style.display = 'none';
     
-    checkAuthStatus();
+    // Check auth first, then load files (so admin buttons render correctly)
+    await checkAuthStatus();
     loadFolders();
     loadFiles();
     setupEventListeners();
@@ -125,6 +135,81 @@ function setupEventListeners() {
     document.getElementById('loginForm').addEventListener('submit', handleLogin);
     document.getElementById('logoutBtn').addEventListener('click', handleLogout);
     document.getElementById('uploadBtn').addEventListener('click', openUploadModal);
+    const prevBtn = document.getElementById('prevFileBtn');
+    const nextBtn = document.getElementById('nextFileBtn');
+    if (prevBtn) prevBtn.addEventListener('click', goToPrevFile);
+    if (nextBtn) nextBtn.addEventListener('click', goToNextFile);
+    // Header toggle buttons (table mode)
+    const autoScrollBtn = document.getElementById('autoScrollBtn');
+    if (autoScrollBtn) {
+        autoScrollBtn.textContent = 'Auto-scroll: Off';
+        autoScrollBtn.addEventListener('click', () => {
+            autoScrollCaptions = !autoScrollCaptions;
+            autoScrollBtn.textContent = `Auto-scroll: ${autoScrollCaptions ? 'On' : 'Off'}`;
+        });
+    }
+    const loopVideoBtn = document.getElementById('loopVideoBtn');
+    if (loopVideoBtn) {
+        loopVideoBtn.textContent = 'Loop: Off (Table mode)';
+        loopVideoBtn.addEventListener('click', () => {
+            loopVideoPlayback = !loopVideoPlayback;
+            loopVideoBtn.textContent = `Loop: ${loopVideoPlayback ? 'On' : 'Off'} (Table mode)`;
+            if (fullVideoElement) fullVideoElement.loop = loopVideoPlayback;
+            if (hoverVideoElement) hoverVideoElement.loop = loopVideoPlayback;
+        });
+    }
+    const translationToggleBtn = document.getElementById('translationToggleBtn');
+    if (translationToggleBtn) {
+        translationToggleBtn.textContent = 'Translations: Off';
+        translationToggleBtn.addEventListener('click', async () => {
+            // Prefer inline translation loaded with the file; fallback to sibling file lookup
+            if (!translatedData && translatedFileId) {
+                await loadTranslatedCaptions();
+            }
+            if (!translatedData) {
+                showNotification('No translated captions found for this file.', 'error');
+                return;
+            }
+            if (!translationEnabled) {
+                currentData = translatedData;
+                translationEnabled = true;
+                translationToggleBtn.textContent = 'Translations: On';
+            } else {
+                currentData = originalData;
+                translationEnabled = false;
+                translationToggleBtn.textContent = 'Translations: Off';
+            }
+            renderTable();
+            renderCaptionCheckTable();
+            updateStats();
+            updateCaptionCheckTableHighlight();
+        });
+    }
+    const downloadTranslatedBtn = document.getElementById('downloadTranslatedBtn');
+    if (downloadTranslatedBtn) {
+        downloadTranslatedBtn.disabled = true;
+        downloadTranslatedBtn.addEventListener('click', async () => {
+            if (!currentFileId) return;
+            try {
+                const resp = await fetch(`/api/files/${currentFileId}/export-srt-translated`);
+                if (!resp.ok) {
+                    showNotification('No translated captions found', 'error');
+                    return;
+                }
+                const blob = await resp.blob();
+                const url = window.URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                const baseName = document.getElementById('currentFileName').textContent || 'captions';
+                a.download = `${baseName}_translated.srt`;
+                a.click();
+                window.URL.revokeObjectURL(url);
+                showNotification('Translated SRT downloaded', 'success');
+            } catch (e) {
+                showNotification('Error downloading translated SRT', 'error');
+            }
+        });
+    }
     
     // Add escape key to close modals
     document.addEventListener('keydown', (e) => {
@@ -161,8 +246,6 @@ function setupEventListeners() {
     
     document.getElementById('videoModeBtn').addEventListener('click', toggleVideoMode);
     document.getElementById('showCaptionsToggle').addEventListener('change', toggleCaptionDisplay);
-    document.getElementById('splitCaptionsToggle').addEventListener('change', toggleSplitCaptions);
-    document.getElementById('downloadSplitCaptionsBtn').addEventListener('click', downloadSplitCaptions);
     document.getElementById('videoCommentsMode').addEventListener('change', toggleVideoCommentsMode);
     
     // These buttons don't exist in new layout - make optional
@@ -333,6 +416,35 @@ function updateButtonOpacity(e) {
     });
 }
 
+function normalizeBaseName(name) {
+    if (!name) return '';
+    return name.replace(/\.(csv|srt|mp4|webm|mov|avi)$/i, '').replace(/_translated$/i, '');
+}
+
+function findTranslatedFileId(originalName) {
+    const base = normalizeBaseName(originalName);
+    const translatedBase = `${base}_translated`;
+    const match = cachedFiles.find(f => normalizeBaseName(f.name) === translatedBase);
+    return match ? match.id : null;
+}
+
+async function loadTranslatedCaptions() {
+    if (!translatedFileId) return;
+    if (translatedData) return;
+    try {
+        const response = await fetch(`/api/files/${translatedFileId}`);
+        if (!response.ok) {
+            showNotification('Error loading translated captions', 'error');
+            return;
+        }
+        const fileData = await response.json();
+        translatedData = fileData.data;
+    } catch (error) {
+        console.error('Translated load error:', error);
+        showNotification('Error loading translated captions', 'error');
+    }
+}
+
 function updateVideoProgress() {
     if (!fullVideoElement) return;
     const progressFill = document.getElementById('videoProgressFill');
@@ -433,6 +545,8 @@ async function checkAuthStatus() {
 }
 
 function updateUIForAuth() {
+    console.log('updateUIForAuth called, isAdmin:', isAdmin);
+    
     if (isAdmin) {
         document.getElementById('adminPanel').style.display = 'flex';
         document.getElementById('loginBtn').style.display = 'none';
@@ -451,6 +565,9 @@ function updateUIForAuth() {
         document.getElementById('bulkActionsBar').style.display = 'none';
     }
     updateBulkDeleteUI();
+    
+    // Reload files to show/hide admin buttons
+    loadFiles();
     
     // Update shared mode UI if editor is open
     if (currentFileId) {
@@ -768,6 +885,8 @@ function displaySelectedFiles(files) {
     // Separate by type
     const captionFiles = files.filter(f => isCaptionFileName(f.name));
     const videoFiles = files.filter(f => isVideoFileName(f.name));
+    const translatedCaptionFiles = captionFiles.filter(f => /_translated\.(srt|csv)$/i.test(f.name));
+    const originalCaptionFiles = captionFiles.filter(f => !/_translated\.(srt|csv)$/i.test(f.name));
     
     console.log('Caption files:', captionFiles.length, 'Videos:', videoFiles.length);
     
@@ -821,9 +940,13 @@ function displaySelectedFiles(files) {
     }
     
     filesList.innerHTML = `
-        ${captionFiles.length > 0 ? `<div class="file-type-group">
-            <strong>📄 Caption Files (${captionFiles.length}):</strong>
-            ${captionFiles.map(f => `<div class="file-item">${f.name} (${(f.size / 1024).toFixed(1)} KB)</div>`).join('')}
+        ${originalCaptionFiles.length > 0 ? `<div class="file-type-group">
+            <strong>📄 Original Captions (${originalCaptionFiles.length}):</strong>
+            ${originalCaptionFiles.map(f => `<div class="file-item">${f.name} (${(f.size / 1024).toFixed(1)} KB)</div>`).join('')}
+        </div>` : ''}
+        ${translatedCaptionFiles.length > 0 ? `<div class="file-type-group">
+            <strong>🌐 Translated Captions (${translatedCaptionFiles.length}):</strong>
+            ${translatedCaptionFiles.map(f => `<div class="file-item">${f.name} (${(f.size / 1024).toFixed(1)} KB)</div>`).join('')}
         </div>` : ''}
         ${videoFiles.length > 0 ? `<div class="file-type-group">
             <strong>🎥 Video Files (${videoFiles.length}):</strong>
@@ -906,13 +1029,20 @@ async function handleUpload(e) {
             const response = await fetch('/api/upload-bulk', {
                 method: 'POST',
                 body: formData,
+                credentials: 'include', // ensure cookies are sent (session)
                 signal: uploadAbortController.signal
             });
             
             console.log('Response status:', response.status);
             console.log('Response headers:', response.headers.get('content-type'));
             
-            if (response.ok) {
+            if (response.status === 401) {
+                progressText.textContent = 'Error: Session expired. Please log in again.';
+                showNotification('Session expired. Please log in again.', 'error');
+                submitBtn.disabled = false;
+                openLoginModal();
+                return;
+            } else if (response.ok) {
                 const results = await response.json();
                 progressBar.style.width = '100%';
                 
@@ -1052,6 +1182,7 @@ async function handleUpload(e) {
             const captionResponse = await fetch('/api/upload', {
                 method: 'POST',
                 body: captionFormData,
+                credentials: 'include', // include session cookie
                 signal: uploadAbortController.signal
             });
             
@@ -1069,6 +1200,7 @@ async function handleUpload(e) {
                 const videoResponse = await fetch(`/api/files/${fileId}/upload-video`, {
                     method: 'POST',
                     body: videoFormData,
+                    credentials: 'include', // include session cookie
                     signal: uploadAbortController.signal
                 });
                 
@@ -1219,6 +1351,7 @@ async function loadFiles() {
     try {
         const response = await fetch('/api/files');
         const allFiles = await response.json();
+        cachedFiles = allFiles;
         
         console.log('Loaded files:', allFiles);
         
@@ -1309,7 +1442,7 @@ function renderFolderExplorer(allFiles) {
             
             return `
                 <div class="explorer-section">
-                    <div class="explorer-header" onclick="toggleSection('folder_${folder.id}')">
+                    <div class="explorer-header collapsed" onclick="toggleSection('folder_${folder.id}')">
                         <span class="toggle-icon">▼</span>
                         <strong>📁 ${folder.name}</strong>
                         <span class="file-count-badge">${folderFiles.length}</span>
@@ -1320,7 +1453,7 @@ function renderFolderExplorer(allFiles) {
                             </div>
                         ` : ''}
                     </div>
-                    <div id="folder_${folder.id}" class="explorer-content" data-folder-id="${folder.id}">
+                    <div id="folder_${folder.id}" class="explorer-content collapsed" data-folder-id="${folder.id}">
                         <div class="file-grid">
                             ${folderFiles.length === 0 ? 
                                 '<p class="loading" style="margin: 10px 0;">Drop files here to add them to this folder</p>' :
@@ -1357,7 +1490,7 @@ function renderFolderExplorer(allFiles) {
 let draggedFileId = null;
 
 function handleDragStart(e) {
-    draggedFileId = e.currentTarget.getAttribute('onclick').match(/openFile\('([^']+)'\)/)[1];
+    draggedFileId = e.currentTarget.dataset.fileId;
     e.currentTarget.style.opacity = '0.5';
     e.dataTransfer.effectAllowed = 'move';
 }
@@ -1436,8 +1569,21 @@ function renderFileCard(file) {
                onclick="event.stopPropagation();">
     ` : '';
     
+    // Action buttons (admin only) - ALWAYS show if admin
+    const actionButtonsHtml = isAdmin ? `
+        <div class="file-actions" style="display: flex !important;">
+            <button class="btn-icon btn-move" onclick="openAssignFolderModal(event, '${file.id}')" title="Move to folder">📁</button>
+            <button class="btn-icon btn-delete" onclick="deleteFile(event, '${file.id}')" title="Delete file">🗑️</button>
+        </div>
+    ` : '';
+    
     return `
-        <div class="file-card ${file.completed ? 'completed' : ''} ${selectedFiles.has(file.id) ? 'selected' : ''} ${file.isStacked ? 'stacked' : ''}" onclick="openFile('${file.id}')">
+        <div class="file-card ${file.completed ? 'completed' : ''} ${selectedFiles.has(file.id) ? 'selected' : ''} ${file.isStacked ? 'stacked' : ''}"
+             data-file-id="${file.id}"
+             draggable="true"
+             ondragstart="handleDragStart(event)"
+             ondragend="handleDragEnd(event)"
+             onclick="openFile('${file.id}')">
             ${checkboxHtml}
             ${thumbnailHtml}
             <div class="file-card-content">
@@ -1461,12 +1607,7 @@ function renderFileCard(file) {
                         <span>📊 ${file.rowCount} rows</span>
                         <span>📅 ${new Date(file.uploadDate).toLocaleDateString()}</span>
                     </div>
-                    ${isAdmin ? `
-                        <div class="file-actions">
-                            <button class="btn-icon btn-move" onclick="openAssignFolderModal(event, '${file.id}')" title="Move to folder">📁</button>
-                            <button class="btn-icon btn-delete" onclick="deleteFile(event, '${file.id}')" title="Delete file">🗑️</button>
-                        </div>
-                    ` : ''}
+                    ${actionButtonsHtml}
                 </div>
             </div>
         </div>
@@ -1483,6 +1624,7 @@ function toggleSection(sectionId) {
     if (content.classList.contains('collapsed')) {
         content.classList.remove('collapsed');
         if (header) header.classList.remove('collapsed');
+        // If expanding a folder, rebuild cachedFiles order unchanged
     } else {
         content.classList.add('collapsed');
         if (header) header.classList.add('collapsed');
@@ -1507,6 +1649,51 @@ async function deleteFolder(folderId) {
     }
 }
 
+function buildCurrentFileList(fileId) {
+    // Build ordered list within the same folder (or unorganized if no folder)
+    let list = [];
+    const current = cachedFiles.find(f => f.id === fileId);
+    if (!current) return [];
+    
+    const folderId = current.folderId || null;
+    if (folderId) {
+        list = cachedFiles.filter(f => f.folderId === folderId);
+    } else {
+        list = cachedFiles.filter(f => !f.folderId);
+    }
+    // Sort by uploadDate desc (same as render order)
+    list = list.sort((a, b) => new Date(b.uploadDate) - new Date(a.uploadDate));
+    currentFileList = list;
+    currentFileIndex = list.findIndex(f => f.id === fileId);
+    updateNavButtons();
+    return list;
+}
+
+function getNeighborFile(direction) {
+    if (!currentFileList.length || currentFileIndex === -1) return null;
+    let idx = currentFileIndex + direction;
+    if (idx < 0 || idx >= currentFileList.length) return null;
+    return currentFileList[idx];
+}
+
+function updateNavButtons() {
+    const prevBtn = document.getElementById('prevFileBtn');
+    const nextBtn = document.getElementById('nextFileBtn');
+    if (!prevBtn || !nextBtn) return;
+    prevBtn.disabled = currentFileIndex <= 0;
+    nextBtn.disabled = currentFileIndex === -1 || currentFileIndex >= currentFileList.length - 1;
+}
+
+function goToPrevFile() {
+    const neighbor = getNeighborFile(-1);
+    if (neighbor) openFile(neighbor.id);
+}
+
+function goToNextFile() {
+    const neighbor = getNeighborFile(1);
+    if (neighbor) openFile(neighbor.id);
+}
+
 async function openFile(fileId) {
     // Toggle: if same file is clicked, close editor
     if (currentFileId === fileId) {
@@ -1518,8 +1705,12 @@ async function openFile(fileId) {
         const response = await fetch(`/api/files/${fileId}`);
         const fileData = await response.json();
 
+        // Build navigation list within same folder
+        buildCurrentFileList(fileId);
+
         currentFileId = fileId;
-        currentData = fileData.data;
+        originalData = fileData.data;
+        currentData = originalData;
         isCompleted = fileData.completed || false;
         currentVideoFile = fileData.videoFile || null;
         videoComments = fileData.videoComments || [];
@@ -1549,15 +1740,10 @@ async function openFile(fileId) {
         
         renderTable();
         updateStats();
+        updateNavButtons();
         
         // Render caption check table by default (in video mode)
         renderCaptionCheckTable();
-        
-        // Regenerate split captions if toggle is enabled
-        const splitToggle = document.getElementById('splitCaptionsToggle');
-        if (splitToggle && splitToggle.checked) {
-            generateSplitCaptions();
-        }
         
         // Initialize mode toggle labels (Caption Checking Mode is default)
         const videoCommentsMode = document.getElementById('videoCommentsMode');
@@ -1570,6 +1756,21 @@ async function openFile(fileId) {
         
         // Hide elements for shared folder view
         updateUIForSharedMode();
+
+        // Reset translation state, wire translation data if present
+        translationEnabled = false;
+        translatedData = fileData.translation?.data || null;
+        // Fallback: if backend didn't inline it, find sibling translated entry
+        translatedFileId = translatedData ? null : findTranslatedFileId(fileData.originalName);
+        const translationToggleBtn = document.getElementById('translationToggleBtn');
+        if (translationToggleBtn) {
+            translationToggleBtn.textContent = 'Translations: Off';
+            translationToggleBtn.disabled = !(translatedData || translatedFileId);
+        }
+        const downloadTranslatedBtn = document.getElementById('downloadTranslatedBtn');
+        if (downloadTranslatedBtn) {
+            downloadTranslatedBtn.disabled = !(translatedData || translatedFileId);
+        }
     } catch (error) {
         showNotification('Error loading file', 'error');
     }
@@ -1639,12 +1840,20 @@ function toggleEditorControls() {
 async function deleteFile(event, fileId) {
     event.stopPropagation();
     
-    if (!confirm('Are you sure you want to delete this file?')) return;
+    console.log('deleteFile called for:', fileId);
+    
+    if (!confirm('Are you sure you want to delete this file?')) {
+        console.log('Delete cancelled by user');
+        return;
+    }
 
     try {
+        console.log('Sending delete request...');
         const response = await fetch(`/api/files/${fileId}`, {
             method: 'DELETE'
         });
+
+        console.log('Delete response:', response.status, response.ok);
 
         if (response.ok) {
             showNotification('File deleted successfully', 'success');
@@ -1652,9 +1861,14 @@ async function deleteFile(event, fileId) {
             if (currentFileId === fileId) {
                 closeEditor();
             }
+        } else {
+            const errorData = await response.json().catch(() => ({}));
+            console.error('Delete failed:', errorData);
+            showNotification(`Delete failed: ${errorData.error || 'Unknown error'}`, 'error');
         }
     } catch (error) {
-        showNotification('Error deleting file', 'error');
+        console.error('Delete error:', error);
+        showNotification(`Error deleting file: ${error.message}`, 'error');
     }
 }
 
@@ -1848,9 +2062,32 @@ function updateStats() {
 }
 
 // Completion toggle
-function toggleCompletion() {
+async function toggleCompletion() {
     isCompleted = document.getElementById('completionCheckbox').checked;
-    // Don't auto-save, let user click Save Changes button
+    await saveCompletionStatus();
+}
+
+async function saveCompletionStatus() {
+    if (!currentFileId) return;
+    try {
+        const payload = { 
+            data: currentData,
+            completed: isCompleted
+        };
+        const response = await fetch(`/api/files/${currentFileId}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        if (!response.ok) {
+            showNotification('Error updating completion status', 'error');
+        } else {
+            showNotification(isCompleted ? 'Marked as completed' : 'Marked as in progress', 'success');
+        }
+    } catch (error) {
+        console.error('Completion save error:', error);
+        showNotification('Error updating completion status', 'error');
+    }
 }
 
 // Save and download
@@ -1967,43 +2204,6 @@ async function exportSrt() {
     }
 }
 
-async function downloadSplitCaptions() {
-    if (splitCaptions.length === 0) {
-        showNotification('No split captions to download. Enable split captions first.', 'error');
-        return;
-    }
-
-    try {
-        // Convert split captions to CSV format
-        const headers = ['segment', 'start_seconds', 'end_seconds', 'text'];
-        const csvRows = [headers.join(',')];
-        
-        splitCaptions.forEach((caption, index) => {
-            const row = [
-                index + 1,
-                caption.start_seconds.toFixed(3),
-                caption.end_seconds.toFixed(3),
-                `"${(caption.text || '').replace(/"/g, '""')}"`
-            ];
-            csvRows.push(row.join(','));
-        });
-        
-        const csvContent = csvRows.join('\n');
-        const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-        const url = window.URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url;
-        const baseName = document.getElementById('currentFileName').textContent || 'captions';
-        a.download = `${baseName}_split.csv`;
-        a.click();
-        window.URL.revokeObjectURL(url);
-        showNotification('Split captions downloaded successfully', 'success');
-    } catch (error) {
-        console.error('Download split captions error:', error);
-        showNotification('Error downloading split captions', 'error');
-    }
-}
-
 // Video functionality
 function setupVideoSection() {
     const fullVideoSection = document.getElementById('fullVideoSection');
@@ -2033,6 +2233,8 @@ function setupVideoSection() {
         // Load videos in both players
         hoverVideoElement.src = `/api/videos/${currentVideoFile}`;
         fullVideoElement.src = `/api/videos/${currentVideoFile}`;
+        hoverVideoElement.loop = loopVideoPlayback;
+        fullVideoElement.loop = loopVideoPlayback;
         
         // Scale caption based on video dimensions when video loads
         fullVideoElement.addEventListener('loadedmetadata', updateCaptionSize);
@@ -2352,92 +2554,14 @@ function toggleCaptionDisplay() {
     // If checked, the timeupdate event will show captions
 }
 
-function toggleSplitCaptions() {
-    const isChecked = document.getElementById('splitCaptionsToggle').checked;
-    const downloadBtn = document.getElementById('downloadSplitCaptionsBtn');
-    
-    if (isChecked) {
-        generateSplitCaptions();
-        // Only show download button if not in shared mode
-        if (!isSharedMode()) {
-            downloadBtn.style.display = 'inline-block';
-        }
-    } else {
-        downloadBtn.style.display = 'none';
-    }
-}
-
-function generateSplitCaptions() {
-    splitCaptions = [];
-    
-    currentData.forEach((segment, index) => {
-        const text = segment.text || '';
-        const startTime = parseFloat(segment.start_seconds || 0);
-        const endTime = parseFloat(segment.end_seconds || 0);
-        const duration = endTime - startTime;
-        
-        if (!text || duration <= 0) return;
-        
-        // Split text into 20-character chunks
-        const chunks = [];
-        let currentChunk = '';
-        
-        // Split by words to avoid breaking words
-        const words = text.split(' ');
-        for (const word of words) {
-            if ((currentChunk + ' ' + word).length <= 20) {
-                currentChunk = currentChunk ? currentChunk + ' ' + word : word;
-            } else {
-                if (currentChunk) {
-                    chunks.push(currentChunk);
-                }
-                // If single word is longer than 20 chars, split it
-                if (word.length > 20) {
-                    for (let i = 0; i < word.length; i += 20) {
-                        chunks.push(word.substring(i, i + 20));
-                    }
-                    currentChunk = '';
-                } else {
-                    currentChunk = word;
-                }
-            }
-        }
-        if (currentChunk) {
-            chunks.push(currentChunk);
-        }
-        
-        // If no chunks (empty text), skip
-        if (chunks.length === 0) return;
-        
-        // Distribute duration equally across chunks
-        const chunkDuration = duration / chunks.length;
-        
-        chunks.forEach((chunkText, chunkIndex) => {
-            const chunkStart = startTime + (chunkIndex * chunkDuration);
-            const chunkEnd = chunkIndex === chunks.length - 1 ? endTime : startTime + ((chunkIndex + 1) * chunkDuration);
-            
-            splitCaptions.push({
-                text: chunkText,
-                start_seconds: chunkStart,
-                end_seconds: chunkEnd,
-                originalIndex: index,
-                chunkIndex: chunkIndex
-            });
-        });
-    });
-}
-
 function findSegmentAtTime(time) {
-    const splitToggle = document.getElementById('splitCaptionsToggle');
-    const dataSource = splitToggle && splitToggle.checked ? splitCaptions : currentData;
-    
-    for (let i = 0; i < dataSource.length; i++) {
-        const segment = dataSource[i];
+    for (let i = 0; i < currentData.length; i++) {
+        const segment = currentData[i];
         const start = parseFloat(segment.start_seconds || 0);
         const end = parseFloat(segment.end_seconds || 0);
         
         // Include the end time for the last segment to handle edge cases
-        const isLastSegment = i === dataSource.length - 1;
+        const isLastSegment = i === currentData.length - 1;
         if (time >= start && (isLastSegment ? time <= end : time < end)) {
             return { ...segment, index: i };
         }
@@ -2557,13 +2681,14 @@ function renderCaptionCheckTable() {
         const endTime = formatTime(row.end_seconds);
         
         return `
-            <tr data-index="${index}" onclick="jumpToCaptionSegment(${index})">
+            <tr data-index="${index}" onclick="jumpToCaptionSegment(${index}, event)">
                 <td style="text-align: center; font-family: monospace; color: #6b7280;">${startTime}</td>
                 <td style="text-align: center; font-family: monospace; color: #6b7280;">${endTime}</td>
                 <td class="text-cell">
                     <input type="text" class="reason-input" value="${row.text || ''}" 
                         onchange="updateTextAndRefresh(${index}, this.value)"
-                        onclick="event.stopPropagation()">
+                        onfocus="isEditingCaption=true;"
+                        onblur="isEditingCaption=false;">
                 </td>
             </tr>
         `;
@@ -2574,27 +2699,26 @@ function updateTextAndRefresh(index, value) {
     // Update the data
     currentData[index].text = value;
     
-    // Regenerate split captions if toggle is enabled
-    const splitToggle = document.getElementById('splitCaptionsToggle');
-    if (splitToggle && splitToggle.checked) {
-        generateSplitCaptions();
-    }
-    
     // Also re-render the main table so changes are reflected
     const tbody = document.getElementById('tableBody');
     if (tbody) {
         renderTableBody();
     }
+
+    // Auto-save text changes (debounced inside saveChanges)
+    saveChanges();
 }
 
-function jumpToCaptionSegment(index) {
+function jumpToCaptionSegment(index, evt) {
+    if (evt && evt.target && evt.target.tagName === 'INPUT') return;
+    if (isEditingCaption) return;
     if (!fullVideoElement) return;
     
     const row = currentData[index];
     const startTime = parseFloat(row.start_seconds || 0);
     
     fullVideoElement.currentTime = startTime;
-    fullVideoElement.play();
+    fullVideoElement.pause(); // do not auto-play when navigating from table
 }
 
 function updateCaptionCheckTableHighlight() {
@@ -2611,14 +2735,13 @@ function updateCaptionCheckTableHighlight() {
         const rows = document.querySelectorAll('#captionCheckBody tr');
         rows.forEach(row => {
             const rowIndex = parseInt(row.getAttribute('data-index'));
-            // When split captions are enabled, use originalIndex to match with original data
-            // When not enabled, use index directly
-            const segmentIndex = currentSegment.originalIndex !== undefined ? currentSegment.originalIndex : currentSegment.index;
             
-            if (rowIndex === segmentIndex) {
+            if (rowIndex === currentSegment.index) {
                 row.classList.add('current-segment');
-                // Auto-scroll to current segment
-                row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                // Auto-scroll only if enabled
+                if (autoScrollCaptions) {
+                    row.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                }
             } else {
                 row.classList.remove('current-segment');
             }
@@ -2629,8 +2752,6 @@ function updateCaptionCheckTableHighlight() {
         rows.forEach(row => row.classList.remove('current-segment'));
     }
 }
-
-// findSegmentAtTime is defined above with split caption support
 
 function addCommentAtTimestamp() {
     if (!fullVideoElement) return;

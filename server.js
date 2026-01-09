@@ -13,6 +13,11 @@ const rateLimit = require('express-rate-limit');
 const app = express();
 const PORT = process.env.PORT || 3000;
 const NODE_ENV = process.env.NODE_ENV || 'development';
+// Detect real production (Railway) vs local; LOCAL_DEV=true forces dev behavior
+const isRailway = !!process.env.RAILWAY_ENVIRONMENT_NAME;
+const isLocalOverride = process.env.LOCAL_DEV === 'true';
+// Treat as production only when on Railway (or if explicitly forced via FORCE_PROD)
+const isProd = isRailway || process.env.FORCE_PROD === 'true';
 const CAPTION_EXTENSIONS = ['.csv', '.srt'];
 const VIDEO_EXTENSIONS = ['.mp4', '.webm', '.mov', '.avi'];
 
@@ -36,10 +41,10 @@ if (process.env.FFMPEG_PATH) {
   ffmpeg.setFfmpegPath(process.env.FFMPEG_PATH);
 }
 
-// Trust proxy - MUST be set before initializing rate limiters
-// Railway uses proxies, so we need to trust the proxy to get real client IPs
-if (NODE_ENV === 'production') {
-  app.set('trust proxy', true); // Trust all proxies for Railway
+// Trust proxy - only when actually running behind a proxy (Railway)
+// Use isProd flag (Railway) rather than NODE_ENV to avoid local dev crashes
+if (isProd) {
+  app.set('trust proxy', true); // Trust proxies on Railway
 }
 
 // Helper function to extract group key from filename (first 4 tokens)
@@ -60,7 +65,10 @@ function normalizeFilename(filename) {
   if (!filename || typeof filename !== 'string') {
     return '';
   }
-  return filename.replace(/\.(csv|srt|mp4|webm|mov|avi)$/i, '').replace(/_split$/i, '');
+  return filename
+    .replace(/\.(csv|srt|mp4|webm|mov|avi)$/i, '')
+    .replace(/_split$/i, '')
+    .replace(/_translated$/i, ''); // allow translated captions to match the base video
 }
 
 // Helper function to extract base name and version from filename
@@ -70,7 +78,10 @@ function extractBaseNameAndVersion(filename) {
     return { baseName: '', version: null };
   }
   
-  const nameWithoutExt = filename.replace(/\.(csv|srt|mp4|webm|mov|avi)$/i, '');
+  // Treat `_translated` as a suffix (not part of version parsing)
+  const nameWithoutExt = filename
+    .replace(/\.(csv|srt|mp4|webm|mov|avi)$/i, '')
+    .replace(/_translated$/i, '');
   
   // Match version pattern: _v001, _v0001, _v1, etc. at the end
   const versionMatch = nameWithoutExt.match(/_v(\d+)$/i);
@@ -83,6 +94,11 @@ function extractBaseNameAndVersion(filename) {
   
   // No version found, return entire name as base
   return { baseName: nameWithoutExt, version: null };
+}
+
+function isTranslatedCaptionFilename(filename) {
+  if (!filename || typeof filename !== 'string') return false;
+  return /_translated\.(csv|srt)$/i.test(filename);
 }
 
 // Helper function to find existing file entry by base name
@@ -158,40 +174,40 @@ function parseSrtContent(content) {
 
   blocks.forEach((block, blockIndex) => {
     try {
-      const lines = block.split('\n').map(line => line.trim()).filter(Boolean);
-      if (lines.length < 2) {
+    const lines = block.split('\n').map(line => line.trim()).filter(Boolean);
+    if (lines.length < 2) {
         // Skip empty or invalid blocks
-        return;
-      }
+      return;
+    }
 
-      let lineIndex = 0;
-      let segmentLabel = lines[lineIndex];
+    let lineIndex = 0;
+    let segmentLabel = lines[lineIndex];
       
       // Check if first line is a number (subtitle index)
-      if (/^\d+$/.test(segmentLabel)) {
-        lineIndex += 1;
-      } else {
-        // If not a number, use block index as segment label
-        segmentLabel = (records.length + 1).toString();
-      }
-
-      if (lineIndex >= lines.length) {
-        return;
-      }
-
-      const timingLine = lines[lineIndex];
+    if (/^\d+$/.test(segmentLabel)) {
       lineIndex += 1;
+    } else {
+        // If not a number, use block index as segment label
+      segmentLabel = (records.length + 1).toString();
+    }
+
+    if (lineIndex >= lines.length) {
+      return;
+    }
+
+    const timingLine = lines[lineIndex];
+    lineIndex += 1;
       
       // Match timing format: HH:MM:SS,mmm --> HH:MM:SS,mmm or HH:MM:SS.mmm --> HH:MM:SS.mmm
-      const timingMatch = timingLine.match(/(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,\.]\d{3})/);
-      if (!timingMatch) {
+    const timingMatch = timingLine.match(/(\d{2}:\d{2}:\d{2}[,\.]\d{3})\s*-->\s*(\d{2}:\d{2}:\d{2}[,\.]\d{3})/);
+    if (!timingMatch) {
         // Skip blocks without valid timing
         console.warn(`Skipping SRT block ${blockIndex + 1}: invalid timing line "${timingLine}"`);
-        return;
-      }
+      return;
+    }
 
-      const startSeconds = parseTimestampToSeconds(timingMatch[1]);
-      const endSeconds = parseTimestampToSeconds(timingMatch[2]);
+    const startSeconds = parseTimestampToSeconds(timingMatch[1]);
+    const endSeconds = parseTimestampToSeconds(timingMatch[2]);
       
       // Validate timing
       if (isNaN(startSeconds) || isNaN(endSeconds) || endSeconds < startSeconds) {
@@ -199,26 +215,26 @@ function parseSrtContent(content) {
         return;
       }
       
-      const duration = Math.max(0, endSeconds - startSeconds);
-      let text = lines.slice(lineIndex).join(' ').trim();
+    const duration = Math.max(0, endSeconds - startSeconds);
+    let text = lines.slice(lineIndex).join(' ').trim();
 
       // Skip if no text content
       if (!text) {
         return;
       }
 
-      // Strip any existing <font> tags or other simple HTML formatting
-      text = text.replace(/<\/?font[^>]*>/gi, '');
+    // Strip any existing <font> tags or other simple HTML formatting
+    text = text.replace(/<\/?font[^>]*>/gi, '');
 
-      records.push({
-        segment: segmentLabel,
-        start_seconds: startSeconds.toFixed(3),
-        end_seconds: endSeconds.toFixed(3),
-        duration: duration.toFixed(3),
-        start_time: secondsToTimestamp(startSeconds),
-        end_time: secondsToTimestamp(endSeconds),
-        text
-      });
+    records.push({
+      segment: segmentLabel,
+      start_seconds: startSeconds.toFixed(3),
+      end_seconds: endSeconds.toFixed(3),
+      duration: duration.toFixed(3),
+      start_time: secondsToTimestamp(startSeconds),
+      end_time: secondsToTimestamp(endSeconds),
+      text
+    });
     } catch (blockError) {
       // Log but continue processing other blocks
       console.warn(`Error processing SRT block ${blockIndex + 1}:`, blockError.message);
@@ -239,21 +255,21 @@ function parseCaptionFile(filePath, originalName) {
       fileContent = fs.readFileSync(filePath, 'latin1');
     }
     
-    const ext = path.extname(originalName).toLowerCase();
+  const ext = path.extname(originalName).toLowerCase();
 
-    if (ext === '.srt') {
-      const records = parseSrtContent(fileContent);
-      if (!records.length) {
+  if (ext === '.srt') {
+    const records = parseSrtContent(fileContent);
+    if (!records.length) {
         throw new Error(`SRT file "${originalName}" is empty or invalid - no subtitle blocks found`);
-      }
-      return records;
     }
+    return records;
+  }
 
-    return parse(fileContent, {
-      columns: true,
-      skip_empty_lines: true,
-      trim: true
-    });
+  return parse(fileContent, {
+    columns: true,
+    skip_empty_lines: true,
+    trim: true
+  });
   } catch (error) {
     // Re-throw with more context
     throw new Error(`Failed to parse ${originalName}: ${error.message}`);
@@ -392,6 +408,7 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(express.static('public'));
 
 // Session configuration
+// Use lax + insecure cookies on localhost to avoid Unauthorized issues when not on HTTPS
 const sessionConfig = {
   secret: SESSION_SECRET,
   resave: false,
@@ -399,10 +416,20 @@ const sessionConfig = {
   cookie: { 
     maxAge: 24 * 60 * 60 * 1000, // 24 hours
     httpOnly: true,
-    secure: NODE_ENV === 'production', // HTTPS only in production
-    sameSite: NODE_ENV === 'production' ? 'none' : 'strict' // 'none' needed for Cloudflare proxy
+    secure: isProd, // HTTPS only in production/Railway
+    sameSite: isProd ? 'none' : 'lax' // 'none' for Railway/Cloudflare, 'lax' for localhost
   }
 };
+
+// Log session config for debugging
+console.log('Session config:', {
+  secure: sessionConfig.cookie.secure,
+  sameSite: sessionConfig.cookie.sameSite,
+  nodeEnv: NODE_ENV,
+  isProd,
+  isRailway,
+  isLocalOverride
+});
 
 app.use(session(sessionConfig));
 
@@ -496,7 +523,10 @@ app.post('/api/upload-bulk', requireAdmin, uploadLimiter, uploadBulk.array('file
     // Separate caption and video files
     // Filter out files without valid originalname first
     const validFiles = uploadedFiles.filter(f => f && f.originalname && typeof f.originalname === 'string');
-    const captionFiles = validFiles.filter(f => isCaptionFile(f.originalname));
+    // Process originals first, then translations (so translations attach to the original record)
+    const captionFiles = validFiles
+      .filter(f => isCaptionFile(f.originalname))
+      .sort((a, b) => Number(isTranslatedCaptionFilename(a.originalname)) - Number(isTranslatedCaptionFilename(b.originalname)));
     const videoFiles = validFiles.filter(f => isVideoFile(f.originalname));
     
     console.log('Caption files:', captionFiles.length, 'Videos:', videoFiles.length);
@@ -515,6 +545,7 @@ app.post('/api/upload-bulk', requireAdmin, uploadLimiter, uploadBulk.array('file
     const results = {
       created: [],
       matched: [],
+      translations: [],
       stacked: [], // New: versions that were stacked
       warnings: [], // New: warnings about missing captions for new versions
       unmatched: { captions: [], videos: [] },
@@ -567,6 +598,23 @@ app.post('/api/upload-bulk', requireAdmin, uploadLimiter, uploadBulk.array('file
     
     // Process caption files first (non-versioned and new versions)
     const processedCaptions = new Set();
+    const matchedVideoNormalized = new Set();
+
+    // Build a quick lookup for existing files by normalized name
+    const existingByNormalized = new Map();
+    try {
+      fs.readdirSync(dataDir)
+        .filter(f => f.endsWith('.json') && f !== 'folders.json')
+        .forEach(f => {
+          try {
+            const content = JSON.parse(fs.readFileSync(path.join(dataDir, f), 'utf-8'));
+            if (content && content.originalName) {
+              existingByNormalized.set(normalizeFilename(content.originalName), content);
+            }
+          } catch (_) {}
+        });
+    } catch (_) {}
+    const createdByNormalized = new Map();
     
     for (const captionFile of captionFiles) {
       try {
@@ -576,9 +624,30 @@ app.post('/api/upload-bulk', requireAdmin, uploadLimiter, uploadBulk.array('file
         }
         
         const records = parseCaptionFile(captionFile.path, captionFile.originalname);
+        const isTranslatedCaption = isTranslatedCaptionFilename(captionFile.originalname);
         const { baseName, version } = extractBaseNameAndVersion(captionFile.originalname);
         const captionNormalized = normalizeFilename(captionFile.originalname);
         const groupKey = extractGroupKey(captionFile.originalname);
+
+        // If this is a translated caption, attach it to the base file (same normalized name)
+        if (isTranslatedCaption) {
+          const baseFile = createdByNormalized.get(captionNormalized) || existingByNormalized.get(captionNormalized);
+          if (baseFile && baseFile.id) {
+            baseFile.translation = {
+              originalName: captionFile.originalname,
+              uploadDate: new Date().toISOString(),
+              data: records
+            };
+            baseFile.lastModified = new Date().toISOString();
+            fs.writeFileSync(path.join(dataDir, `${baseFile.id}.json`), JSON.stringify(baseFile, null, 2));
+            results.translations.push({ baseId: baseFile.id, name: captionFile.originalname });
+            processedCaptions.add(captionFile.originalname);
+            fs.unlinkSync(captionFile.path);
+            continue;
+          }
+          // No base file found (should be rare if originals are uploaded too)
+          results.unmatched.captions.push(captionFile.originalname);
+        }
         
         // Check if this caption is for a version that needs stacking
         const stackInfo = videosToStack.find(s => {
@@ -604,6 +673,7 @@ app.post('/api/upload-bulk', requireAdmin, uploadLimiter, uploadBulk.array('file
         
         if (videoMatch) {
           matchedVideo = videoMatch.filename;
+          matchedVideoNormalized.add(normalizeFilename(videoMatch.originalname));
           results.matched.push({
             caption: captionFile.originalname,
             video: videoMatch.originalname
@@ -622,9 +692,6 @@ app.post('/api/upload-bulk', requireAdmin, uploadLimiter, uploadBulk.array('file
             console.error('Failed to generate thumbnail for:', videoMatch.originalname, thumbError);
           }
           
-          // Remove from videoFiles to avoid double matching
-          const index = videoFiles.indexOf(videoMatch);
-          if (index > -1) videoFiles.splice(index, 1);
         } else {
           results.unmatched.captions.push(captionFile.originalname);
         }
@@ -692,6 +759,9 @@ app.post('/api/upload-bulk', requireAdmin, uploadLimiter, uploadBulk.array('file
           groupKey: groupKey,
           isVersioned: !!version
         });
+
+        // Track by normalized name for translation attachment
+        createdByNormalized.set(normalizeFilename(captionFile.originalname), dataFile);
         
         // Clean up uploaded caption file
         fs.unlinkSync(captionFile.path);
@@ -708,7 +778,7 @@ app.post('/api/upload-bulk', requireAdmin, uploadLimiter, uploadBulk.array('file
         // Clean up on error
         if (fs.existsSync(captionFile.path)) {
           try {
-            fs.unlinkSync(captionFile.path);
+          fs.unlinkSync(captionFile.path);
           } catch (unlinkError) {
             console.error('Failed to clean up file:', captionFile.path, unlinkError);
           }
@@ -815,8 +885,10 @@ app.post('/api/upload-bulk', requireAdmin, uploadLimiter, uploadBulk.array('file
     for (const videoFile of videoFiles) {
       // Check if this video matches any remaining caption files
       const videoNormalized = normalizeFilename(videoFile.originalname);
+      if (matchedVideoNormalized.has(videoNormalized)) {
+        continue; // matched earlier; do not delete
+      }
       const captionMatch = captionFiles.find(cf => {
-        if (processedCaptions.has(cf.originalname)) return false;
         const captionNormalized = normalizeFilename(cf.originalname);
         return captionNormalized === videoNormalized;
       });
@@ -946,8 +1018,19 @@ app.get('/api/files', (req, res) => {
     const folderId = req.query.folderId;
     const grouped = req.query.grouped === 'true';
     
-    const files = fs.readdirSync(dataDir)
-      .filter(f => f.endsWith('.json') && f !== 'folders.json') // Exclude folders.json
+    const allJson = fs.readdirSync(dataDir).filter(f => f.endsWith('.json') && f !== 'folders.json');
+    // First pass: collect base (non-translated) files by normalized name
+    const baseByNorm = new Map();
+    allJson.forEach(f => {
+      try {
+        const content = JSON.parse(fs.readFileSync(path.join(dataDir, f), 'utf-8'));
+        if (content?.originalName && !isTranslatedCaptionFilename(content.originalName)) {
+          baseByNorm.set(normalizeFilename(content.originalName), content.id);
+        }
+      } catch (_) {}
+    });
+
+    const files = allJson
       .map(f => {
         try {
           const filePath = path.join(dataDir, f);
@@ -959,24 +1042,31 @@ app.get('/api/files', (req, res) => {
             console.warn(`Skipping invalid file ${f}: missing required fields`);
             return null;
           }
+
+          // Hide translated-only entries if there is a base file for them
+          if (isTranslatedCaptionFilename(content.originalName)) {
+            const norm = normalizeFilename(content.originalName);
+            if (baseByNorm.has(norm)) return null;
+          }
           
-          const { baseName, version } = extractBaseNameAndVersion(content.originalName);
-          return {
-            id: content.id,
-            name: content.originalName,
-            baseName: baseName,
-            version: version,
-            uploadDate: content.uploadDate,
-            rowCount: content.data ? content.data.length : 0,
-            completed: content.completed || false,
-            folderId: content.folderId || null,
-            groupKey: content.groupKey || null,
-            hasVideo: !!content.videoFile,
-            thumbnailFile: content.thumbnailFile || null,
-            commentCount: (content.videoComments || []).length,
-            versionCount: content.versions ? content.versions.length : 0,
-            isStacked: !!(content.versions && content.versions.length > 0)
-          };
+        const { baseName, version } = extractBaseNameAndVersion(content.originalName);
+        return {
+          id: content.id,
+          name: content.originalName,
+          baseName: baseName,
+          version: version,
+          uploadDate: content.uploadDate,
+          rowCount: content.data ? content.data.length : 0,
+          completed: content.completed || false,
+          folderId: content.folderId || null,
+          groupKey: content.groupKey || null,
+          hasVideo: !!content.videoFile,
+          thumbnailFile: content.thumbnailFile || null,
+          commentCount: (content.videoComments || []).length,
+          versionCount: content.versions ? content.versions.length : 0,
+            isStacked: !!(content.versions && content.versions.length > 0),
+            hasTranslation: !!content.translation
+        };
         } catch (fileError) {
           console.error(`Error reading file ${f}:`, fileError.message);
           return null; // Skip corrupted files
@@ -1034,10 +1124,81 @@ app.get('/api/files/:id', (req, res) => {
     }
     
     const fileData = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    // If no inline translation stored, try to find a sibling *_translated entry and attach it
+    if (!fileData.translation && fileData.originalName) {
+      try {
+        const norm = normalizeFilename(fileData.originalName);
+        const candidates = fs.readdirSync(dataDir).filter(f => f.endsWith('.json') && f !== 'folders.json');
+        for (const f of candidates) {
+          try {
+            const content = JSON.parse(fs.readFileSync(path.join(dataDir, f), 'utf-8'));
+            if (!content?.originalName || !content?.data) continue;
+            if (!isTranslatedCaptionFilename(content.originalName)) continue;
+            if (normalizeFilename(content.originalName) !== norm) continue;
+            if ((fileData.folderId || null) !== (content.folderId || null)) continue;
+            fileData.translation = {
+              originalName: content.originalName,
+              uploadDate: content.uploadDate,
+              data: content.data
+            };
+            break;
+          } catch (_) {}
+        }
+      } catch (_) {}
+    }
     res.json(fileData);
   } catch (error) {
     console.error('Error reading file:', error);
     res.status(500).json({ error: 'Failed to read file' });
+  }
+});
+
+// Export translated captions as SRT (admin only)
+app.get('/api/files/:id/export-srt-translated', requireAdmin, (req, res) => {
+  try {
+    const filePath = path.join(dataDir, `${req.params.id}.json`);
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'File not found' });
+    }
+    
+    const fileData = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    const translation = fileData.translation;
+    if (!translation || !translation.data || !Array.isArray(translation.data) || translation.data.length === 0) {
+      return res.status(404).json({ error: 'No translated captions found' });
+    }
+    
+    const segments = translation.data;
+    
+    const formatTimeForSRT = (seconds) => {
+      const sec = parseFloat(seconds || 0);
+      const hours = Math.floor(sec / 3600);
+      const minutes = Math.floor((sec % 3600) / 60);
+      const secs = Math.floor(sec % 60);
+      const millis = Math.floor((sec % 1) * 1000);
+      return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')},${String(millis).padStart(3, '0')}`;
+    };
+    
+    let srtContent = '';
+    segments.forEach((row, index) => {
+      const segmentNumber = index + 1;
+      const startTime = formatTimeForSRT(row.start_seconds);
+      const endTime = formatTimeForSRT(row.end_seconds);
+      const text = row.text || '';
+      srtContent += `${segmentNumber}\n`;
+      srtContent += `${startTime} --> ${endTime}\n`;
+      srtContent += `<font color=#F7F6F2FF>${text}</font>\n`;
+      srtContent += `\n`;
+    });
+    
+    const baseName = (fileData.originalName || 'captions').replace(/\.(csv|srt)$/i, '').replace(/_translated$/i, '');
+    const srtFilename = `${baseName}_translated.srt`;
+    
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${srtFilename}"`);
+    res.send(srtContent);
+  } catch (error) {
+    console.error('Error exporting translated SRT:', error);
+    res.status(500).json({ error: 'Failed to export translated SRT' });
   }
 });
 
