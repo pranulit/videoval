@@ -126,6 +126,20 @@ function setupEventListeners() {
     document.getElementById('logoutBtn').addEventListener('click', handleLogout);
     document.getElementById('uploadBtn').addEventListener('click', openUploadModal);
     
+    // Add escape key to close modals
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'Escape') {
+            const loginModal = document.getElementById('loginModal');
+            const uploadModal = document.getElementById('uploadModal');
+            if (loginModal && loginModal.classList.contains('active')) {
+                closeLoginModal();
+            }
+            if (uploadModal && uploadModal.classList.contains('active')) {
+                closeUploadModal();
+            }
+        }
+    });
+    
     const uploadForm = document.getElementById('uploadForm');
     if (uploadForm) {
         console.log('Upload form found, attaching submit handler');

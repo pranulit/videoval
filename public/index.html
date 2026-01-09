@@ -27,9 +27,12 @@
         </div>
 
         <!-- Login Modal -->
-        <div id="loginModal" class="modal">
-            <div class="modal-content">
-                <h2>Admin Login</h2>
+        <div id="loginModal" class="modal" onclick="if(event.target === this) closeLoginModal()">
+            <div class="modal-content" onclick="event.stopPropagation()">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px;">
+                    <h2 style="margin: 0;">Admin Login</h2>
+                    <button type="button" class="btn btn-danger" onclick="closeLoginModal()" style="padding: 8px 16px; font-size: 18px;">✕</button>
+                </div>
                 <form id="loginForm">
                     <div class="form-group">
                         <label for="username">Username:</label>
