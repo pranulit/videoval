@@ -191,7 +191,7 @@ function setupEventListeners() {
         downloadTranslatedBtn.addEventListener('click', async () => {
             if (!currentFileId) return;
             try {
-                const resp = await fetch(`/api/files/${currentFileId}/export-srt-translated`);
+                const resp = await fetch(`/api/files/${currentFileId}/export-translation-text`);
                 if (!resp.ok) {
                     showNotification('No translated captions found', 'error');
                     return;
@@ -201,12 +201,12 @@ function setupEventListeners() {
                 const a = document.createElement('a');
                 a.href = url;
                 const baseName = document.getElementById('currentFileName').textContent || 'captions';
-                a.download = `${baseName}_translated.srt`;
+                a.download = `${baseName}_translated.txt`;
                 a.click();
                 window.URL.revokeObjectURL(url);
-                showNotification('Translated SRT downloaded', 'success');
+                showNotification('Translation downloaded', 'success');
             } catch (e) {
-                showNotification('Error downloading translated SRT', 'error');
+                showNotification('Error downloading translation', 'error');
             }
         });
     }

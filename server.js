@@ -1202,6 +1202,40 @@ app.get('/api/files/:id/export-srt-translated', requireAdmin, (req, res) => {
   }
 });
 
+// Export translated captions as plain text (single paragraph) (admin only)
+app.get('/api/files/:id/export-translation-text', requireAdmin, (req, res) => {
+  try {
+    const filePath = path.join(dataDir, `${req.params.id}.json`);
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ error: 'File not found' });
+    }
+    
+    const fileData = JSON.parse(fs.readFileSync(filePath, 'utf-8'));
+    const translation = fileData.translation;
+    if (!translation || !translation.data || !Array.isArray(translation.data) || translation.data.length === 0) {
+      return res.status(404).json({ error: 'No translated captions found' });
+    }
+    
+    // Join caption texts into a single paragraph, normalizing whitespace
+    const paragraph = translation.data
+      .map(row => (row.text || '').toString().replace(/\s+/g, ' ').trim())
+      .filter(Boolean)
+      .join(' ');
+    
+    const baseName = (fileData.originalName || 'captions')
+      .replace(/\.(csv|srt)$/i, '')
+      .replace(/_translated$/i, '');
+    const filename = `${baseName}_translated.txt`;
+    
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(paragraph);
+  } catch (error) {
+    console.error('Error exporting translation text:', error);
+    res.status(500).json({ error: 'Failed to export translation text' });
+  }
+});
+
 // Update file data
 app.put('/api/files/:id', (req, res) => {
   try {
